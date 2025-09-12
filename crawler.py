@@ -22,26 +22,25 @@ def main():
     driver = setup_driver()
     driver.get(URL)
 
-    # 페이지 로드 대기
     WebDriverWait(driver, 15).until(
         EC.presence_of_element_located((By.TAG_NAME, "body"))
     )
-    print("✅ 페이지 열림")
+    print("페이지 열림")
 
     # 모든 정보를 담을 리스트
     all_results = []
 
-    # label[1] ~ label[4] 순회
+    # 전기차 대분류 순회
     for i in range(1, 5):
         label_xpath = f'//*[@id="searchForm"]/div/table/tbody/tr[2]/td/label[{i}]'
         label_elem = WebDriverWait(driver, 10).until(
             EC.element_to_be_clickable((By.XPATH, label_xpath))
         )
         driver.execute_script("arguments[0].click();", label_elem)
-        print(f"✅ label[{i}] 선택 완료")
+        print(f"label[{i}] 선택 완료")
         time.sleep(1)
 
-        # 회사 셀렉트 박스 option들 순회
+        # 회사 종류 순회
         select_elem = WebDriverWait(driver, 10).until(
             EC.presence_of_element_located((By.XPATH, '//*[@id="schCompany"]'))
         )
@@ -52,7 +51,7 @@ def main():
                 continue  # value 없는 option은 skip
             driver.execute_script("arguments[0].selected = true;", option)
             option.click()
-            print(f"  ✅ 회사 option[{idx}] ({option.text}) 선택 완료")
+            print(f"  회사 option[{idx}] ({option.text}) 선택 완료")
             time.sleep(1)
 
             # 조회 버튼 클릭
@@ -61,13 +60,12 @@ def main():
                 EC.element_to_be_clickable((By.XPATH, search_btn_xpath))
             )
             driver.execute_script("arguments[0].click();", search_btn)
-            print("    ✅ 조회 버튼 클릭")
+            print("    조회 버튼 클릭")
             time.sleep(2)
 
-            # 페이지네이션 처리: 번호가 있는 동안 반복
+            # 페이지네이션 처리
             page_num = 1
             while True:
-                # subPage의 div[n]/a가 없을 때까지 모든 정보 저장
                 subpage_infos = []
                 n = 1
                 while True:
@@ -79,7 +77,7 @@ def main():
                     info_text = info_elem.text
                     info_href = info_elem.get_attribute("href")
                     subpage_infos.append({"text": info_text, "href": info_href})
-                    print(f"      ✅ subPage div[{n}] 정보 저장: {info_text}")
+                    print(f"      subPage div[{n}] 정보 저장: {info_text}")
                     n += 1
                 # label, option, page 정보를 함께 저장
                 all_results.append({
@@ -94,17 +92,16 @@ def main():
                 try:
                     next_btn = driver.find_element(By.XPATH, next_page_xpath)
                     next_btn.click()
-                    print(f"      ✅ 페이지 {page_num+1} 이동")
+                    print(f"      페이지 {page_num+1} 이동")
                     time.sleep(2)
                     page_num += 1
                 except Exception:
-                    break  # 다음 페이지 없으면 종료
+                    break
 
-    # 모든 결과를 하나의 json 파일로 저장
     json_filename = "all_subpage_infos.json"
     with open(json_filename, "w", encoding="utf-8") as f:
         json.dump(all_results, f, ensure_ascii=False, indent=2)
-    print(f"✅ 전체 결과 {json_filename} 저장 완료")
+    print(f"전체 결과 {json_filename} 저장 완료")
 
 if __name__ == "__main__":
     main()
