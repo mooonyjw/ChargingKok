@@ -9,6 +9,7 @@ import {
   ScrollView,
 } from 'react-native';
 import { useBottomTabBarHeight } from '@react-navigation/bottom-tabs';
+import MapView, { Marker, PROVIDER_GOOGLE } from 'react-native-maps';
 import FilterSheet from '../components/FilterSheet';
 import SelectField from '../components/SelectField';
 
@@ -19,6 +20,14 @@ export default function MainScreen() {
   const [liveStatus, setLiveStatus] = useState('전체');
   const [region, setRegion] = useState('전체');
   const [markers, setMarkers] = useState([]);
+
+  // TODO: 지도 초기 포커스 사용자 위치 중심으로 고치기
+  const [mapRegion, setMapRegion] = useState({
+    latitude: 37.3943,
+    longitude: 127.1107,
+    latitudeDelta: 0.04,
+    longitudeDelta: 0.04,
+  });
 
   // 탭바 높이로 아래 여백 확보
   const tabBarHeight = useBottomTabBarHeight();
@@ -159,6 +168,59 @@ export default function MainScreen() {
             </TouchableOpacity>
           </View>
         </View>
+
+        {/* 지도 카드 */}
+        <View style={styles.mapCard}>
+          <View style={styles.mapBox}>
+            <MapView
+              style={{ flex: 1 }}
+              provider={PROVIDER_GOOGLE}
+              initialRegion={mapRegion}
+              region={mapRegion}
+              onRegionChangeComplete={setMapRegion}
+              showsUserLocation
+              showsMyLocationButton={false}
+              toolbarEnabled={false}
+            >
+              {markers.map(m => (
+                <Marker
+                  key={m.id}
+                  coordinate={{ latitude: m.lat, longitude: m.lng }}
+                  title={m.name}
+                  description={m.status}
+                />
+              ))}
+            </MapView>
+
+            {/* (±) 줌 버튼 */}
+            <View style={styles.fabs}>
+              <TouchableOpacity
+                style={styles.fab}
+                onPress={() =>
+                  setMapRegion(r => ({
+                    ...r,
+                    latitudeDelta: r.latitudeDelta * 0.7,
+                    longitudeDelta: r.longitudeDelta * 0.7,
+                  }))
+                }
+              >
+                <Text style={styles.fabSign}>＋</Text>
+              </TouchableOpacity>
+              <TouchableOpacity
+                style={styles.fab}
+                onPress={() =>
+                  setMapRegion(r => ({
+                    ...r,
+                    latitudeDelta: Math.min(r.latitudeDelta / 0.7, 0.3),
+                    longitudeDelta: Math.min(r.longitudeDelta / 0.7, 0.3),
+                  }))
+                }
+              >
+                <Text style={styles.fabSign}>−</Text>
+              </TouchableOpacity>
+            </View>
+          </View>
+        </View>
       </ScrollView>
 
       {visibleSheet && (
@@ -204,4 +266,46 @@ const styles = StyleSheet.create({
   btnGhost: { backgroundColor: '#d9d9d9' },
   btnGhostText: { color: '#ffffff', fontWeight: '700', fontSize: 18 },
   btnText: { fontSize: 16 },
+
+  // --- 지도 카드 ---
+  mapCard: {
+    marginTop: 16,
+    marginHorizontal: 16,
+    borderRadius: 20,
+    backgroundColor: '#fff',
+    shadowColor: '#000',
+    shadowOpacity: 0.08,
+    shadowRadius: 12,
+    elevation: 6,
+  },
+  mapBox: {
+    height: 360,
+    borderRadius: 20,
+    overflow: 'hidden', // 둥근 모서리로 지도 깔끔하게
+  },
+  fabs: {
+    position: 'absolute',
+    right: 12,
+    top: 12,
+    gap: 10,
+  },
+  fab: {
+    width: 42,
+    height: 42,
+    borderRadius: 21,
+    backgroundColor: '#0E9F6E',
+    alignItems: 'center',
+    justifyContent: 'center',
+    shadowColor: '#000',
+    shadowOpacity: 0.15,
+    shadowRadius: 6,
+    elevation: 6,
+  },
+  fabSign: {
+    color: '#fff',
+    fontSize: 20,
+    fontWeight: '700',
+    lineHeight: 22,
+    includeFontPadding: false,
+  },
 });
