@@ -25,6 +25,10 @@ export default function LoginScreen() {
   const onLogin = () => {
     if (!canLogin) return;
     console.log('로그인 시도', { id: id.trim(), pw: pw.trim() });
+
+    if (id.trim() == 'admin' && pw.trim() == 'admin') {
+      navigation.navigate('Main');
+    }
   };
 
   return (
