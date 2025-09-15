@@ -378,7 +378,7 @@ const styles = StyleSheet.create({
     elevation: 6,
   },
   mapBox: {
-    height: 360,
+    height: 470,
     borderRadius: 20,
     overflow: 'hidden',
   },
