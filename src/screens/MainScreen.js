@@ -9,7 +9,7 @@ import {
   ScrollView,
 } from 'react-native';
 import { useBottomTabBarHeight } from '@react-navigation/bottom-tabs';
-import MapView, { Marker, PROVIDER_GOOGLE } from 'react-native-maps';
+import MapView, { Marker, Callout, PROVIDER_GOOGLE } from 'react-native-maps';
 import FilterSheet from '../components/FilterSheet';
 import SelectField from '../components/SelectField';
 
@@ -21,7 +21,6 @@ export default function MainScreen() {
   const [region, setRegion] = useState('전체');
   const [markers, setMarkers] = useState([]);
 
-  // TODO: 지도 초기 포커스 사용자 위치 중심으로 고치기
   const [mapRegion, setMapRegion] = useState({
     latitude: 37.3943,
     longitude: 127.1107,
@@ -29,7 +28,6 @@ export default function MainScreen() {
     longitudeDelta: 0.04,
   });
 
-  // 탭바 높이로 아래 여백 확보
   const tabBarHeight = useBottomTabBarHeight();
 
   const open = key => () => setVisibleSheet(key);
@@ -43,7 +41,26 @@ export default function MainScreen() {
     setMarkers([]);
   }, []);
 
+  // TODO: 실제 백엔드 연동 시 이 부분에서 결과를 setMarkers 해주면 됨
+  // TODO: 백엔드에서 [{id, latitude, longitude, stationName, address, totalCount, availableCount, fast, priceText, liveStatusText}] 식으로 넘겨주면 onSearch에서 setMarkers()로 예시처럼 매핑
   const onSearch = useCallback(async () => {
+    // --- 예시: 백엔드 응답(모양은 유연하게)
+    // const res = await fetch('https://api.yourserver/chargers?....');
+    // const data = await res.json();
+    // setMarkers(data.map(d => ({
+    //   id: String(d.id),
+    //   lat: d.latitude,
+    //   lng: d.longitude,
+    //   name: d.stationName,
+    //   address: d.address,
+    //   chargers: d.totalCount,                  // 총 대수
+    //   available: d.availableCount,             // 사용 가능 대수
+    //   speed: d.fast ? '급속' : '완속',         // 혹은 '급속/완속 혼합'
+    //   price: d.priceText,                      // "300원/kWh" 등
+    //   status: d.liveStatusText,                // "사용가능/충전중" 등
+    // })));
+
+    // --- 데모 데이터(현재 로직 최대한 유지)
     const demo = [
       {
         id: '1',
@@ -51,6 +68,11 @@ export default function MainScreen() {
         lng: 127.0365,
         name: '강남구청 급속',
         status: '사용가능',
+        address: '서울 강남구 학동로 426',
+        chargers: 6,
+        available: 4,
+        speed: '급속',
+        price: '300원/kWh',
       },
       {
         id: '2',
@@ -58,6 +80,11 @@ export default function MainScreen() {
         lng: 127.028,
         name: '역삼역 공영주차장',
         status: '충전중',
+        address: '서울 강남구 테헤란로 145',
+        chargers: 8,
+        available: 1,
+        speed: '혼합',
+        price: '유료(주차요금 별도)',
       },
       {
         id: '3',
@@ -65,12 +92,29 @@ export default function MainScreen() {
         lng: 127.03,
         name: '선릉공원 완속',
         status: '사용가능',
+        address: '서울 강남구 삼성로 623',
+        chargers: 10,
+        available: 7,
+        speed: '완속',
+        price: '무료',
       },
     ];
+
     const filtered = demo.filter(
       m => liveStatus === '전체' || m.status === liveStatus,
     );
     setMarkers(filtered);
+
+    // 검색 후 카메라를 결과 범위로 살짝 이동하고 싶으면:
+    if (filtered.length > 0) {
+      const latAvg = filtered.reduce((s, m) => s + m.lat, 0) / filtered.length;
+      const lngAvg = filtered.reduce((s, m) => s + m.lng, 0) / filtered.length;
+      setMapRegion(r => ({
+        ...r,
+        latitude: latAvg,
+        longitude: lngAvg,
+      }));
+    }
   }, [liveStatus]);
 
   const sheetData = useMemo(
@@ -126,6 +170,14 @@ export default function MainScreen() {
     [chargerType, feeType, liveStatus, region],
   );
 
+  // TODO: status 백엔드 응답에 따라 고치기
+  // 마커 색상(상태에 따라)
+  const pinColorOf = status => {
+    if (status === '사용가능') return '#10B981'; // green
+    if (status === '충전중') return '#F59E0B'; // amber
+    return '#EF4444'; // red or default
+  };
+
   return (
     <SafeAreaView style={styles.root}>
       <ScrollView
@@ -134,6 +186,7 @@ export default function MainScreen() {
       >
         <Text style={styles.title}>EV 충전소 찾기</Text>
 
+        {/* 필터 카드 */}
         <View style={styles.card}>
           <View style={styles.row}>
             <SelectField
@@ -186,13 +239,59 @@ export default function MainScreen() {
                 <Marker
                   key={m.id}
                   coordinate={{ latitude: m.lat, longitude: m.lng }}
-                  title={m.name}
-                  description={m.status}
-                />
+                  title={m.name || '충전소'}
+                  description={m.status || ''}
+                  pinColor={pinColorOf(m.status)}
+                >
+                  <Callout tooltip>
+                    <View style={styles.calloutWrap}>
+                      <Text style={styles.coTitle}>{m.name || '충전소'}</Text>
+
+                      {/* 주소 */}
+                      <Text style={styles.coRow}>
+                        📍 {m.address || '주소 정보 없음'}
+                      </Text>
+
+                      {/* 대수/가능여부 */}
+                      <Text style={styles.coRow}>
+                        🧩 대수: {m.chargers ?? '-'}{' '}
+                        {typeof m.available === 'number'
+                          ? `(가능 ${m.available})`
+                          : ''}
+                      </Text>
+
+                      {/* 급/완속 */}
+                      <Text style={styles.coRow}>
+                        ⚡ 유형: {m.speed || '정보 없음'}
+                      </Text>
+
+                      {/* 금액 */}
+                      <Text style={styles.coRow}>
+                        💰 금액: {m.price || '정보 없음'}
+                      </Text>
+
+                      {/* 상태 뱃지 */}
+                      <View style={styles.badges}>
+                        <View
+                          style={[
+                            styles.badge,
+                            {
+                              backgroundColor: pinColorOf(m.status),
+                            },
+                          ]}
+                        >
+                          <Text style={styles.badgeText}>
+                            {m.status || '상태 미확인'}
+                          </Text>
+                        </View>
+                      </View>
+                    </View>
+                  </Callout>
+                </Marker>
               ))}
             </MapView>
 
-            {/* (±) 줌 버튼 */}
+            {/* 줌 컨트롤 */}
             <View style={styles.fabs}>
               <TouchableOpacity
                 style={styles.fab}
@@ -267,7 +366,7 @@ const styles = StyleSheet.create({
   btnGhostText: { color: '#ffffff', fontWeight: '700', fontSize: 18 },
   btnText: { fontSize: 16 },
 
-  // --- 지도 카드 ---
+  // 지도 카드
   mapCard: {
     marginTop: 16,
     marginHorizontal: 16,
@@ -281,7 +380,7 @@ const styles = StyleSheet.create({
   mapBox: {
     height: 360,
     borderRadius: 20,
-    overflow: 'hidden', // 둥근 모서리로 지도 깔끔하게
+    overflow: 'hidden',
   },
   fabs: {
     position: 'absolute',
@@ -308,4 +407,30 @@ const styles = StyleSheet.create({
     lineHeight: 22,
     includeFontPadding: false,
   },
+
+  // Callout
+  calloutWrap: {
+    maxWidth: 260,
+    backgroundColor: '#111827',
+    padding: 12,
+    borderRadius: 12,
+  },
+  coTitle: {
+    color: '#fff',
+    fontSize: 16,
+    fontWeight: '700',
+    marginBottom: 6,
+  },
+  coRow: {
+    color: '#E5E7EB',
+    fontSize: 13,
+    marginTop: 2,
+  },
+  badges: { flexDirection: 'row', gap: 8, marginTop: 10 },
+  badge: {
+    paddingHorizontal: 8,
+    paddingVertical: 4,
+    borderRadius: 999,
+  },
+  badgeText: { color: '#fff', fontSize: 12, fontWeight: '700' },
 });
