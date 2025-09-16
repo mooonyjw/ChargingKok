@@ -5,12 +5,14 @@ import TabBar from '../components/TabBar';
 
 import MainScreen from './MainScreen';
 import MyPageScreen from './MyPageScreen';
+import ChatBotScreen from './ChatBotScreen';
 
 const Tab = createBottomTabNavigator();
 
 export default function MainPageScreen() {
   return (
     <Tab.Navigator
+      initialRouteName="charging"
       screenOptions={{ headerShown: false }}
       tabBar={props => {
         const activeRouteName = props.state.routeNames[props.state.index];
@@ -22,7 +24,7 @@ export default function MainPageScreen() {
         );
       }}
     >
-      {/* <Tab.Screen name="chatbot" component={PlaceholderChatbot} /> */}
+      <Tab.Screen name="chatbot" component={ChatBotScreen} />
       <Tab.Screen name="charging" component={MainScreen} />
       <Tab.Screen name="mypage" component={MyPageScreen} />
     </Tab.Navigator>
