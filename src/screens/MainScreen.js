@@ -1,5 +1,5 @@
 // src/screens/MainScreen.js
-import React, { useMemo, useState, useCallback } from 'react';
+import React, { useMemo, useState, useCallback, useEffect } from 'react';
 import {
   SafeAreaView,
   View,
@@ -7,6 +7,9 @@ import {
   StyleSheet,
   TouchableOpacity,
   ScrollView,
+  Platform,
+  PermissionsAndroid,
+  Alert,
 } from 'react-native';
 import { useBottomTabBarHeight } from '@react-navigation/bottom-tabs';
 import MapView, { Marker, Callout, PROVIDER_GOOGLE } from 'react-native-maps';
@@ -41,25 +44,64 @@ export default function MainScreen() {
     setMarkers([]);
   }, []);
 
-  // TODO: 실제 백엔드 연동 시 이 부분에서 결과를 setMarkers 해주면 됨
-  // TODO: 백엔드에서 [{id, latitude, longitude, stationName, address, totalCount, availableCount, fast, priceText, liveStatusText}] 식으로 넘겨주면 onSearch에서 setMarkers()로 예시처럼 매핑
-  const onSearch = useCallback(async () => {
-    // --- 예시: 백엔드 응답(모양은 유연하게)
-    // const res = await fetch('https://api.yourserver/chargers?....');
-    // const data = await res.json();
-    // setMarkers(data.map(d => ({
-    //   id: String(d.id),
-    //   lat: d.latitude,
-    //   lng: d.longitude,
-    //   name: d.stationName,
-    //   address: d.address,
-    //   chargers: d.totalCount,                  // 총 대수
-    //   available: d.availableCount,             // 사용 가능 대수
-    //   speed: d.fast ? '급속' : '완속',         // 혹은 '급속/완속 혼합'
-    //   price: d.priceText,                      // "300원/kWh" 등
-    //   status: d.liveStatusText,                // "사용가능/충전중" 등
-    // })));
+  // ========== 위치 권한 & 내 위치 이동 ==========
+  const requestLocationPermission = useCallback(async () => {
+    if (Platform.OS !== 'android') return true;
+    try {
+      const granted = await PermissionsAndroid.request(
+        PermissionsAndroid.PERMISSIONS.ACCESS_FINE_LOCATION,
+        {
+          title: '위치 권한 요청',
+          message: '내 근처 충전소 표시를 위해 위치 권한이 필요합니다.',
+          buttonPositive: '허용',
+        },
+      );
+      return granted === PermissionsAndroid.RESULTS.GRANTED;
+    } catch {
+      return false;
+    }
+  }, []);
 
+  const moveTo = useCallback((lat, lng, zoom = 0.02) => {
+    setMapRegion(r => ({
+      ...r,
+      latitude: lat,
+      longitude: lng,
+      latitudeDelta: zoom,
+      longitudeDelta: zoom,
+    }));
+  }, []);
+
+  // TODO: 실제 휴대폰에서 테스트 필요
+  const locateMe = useCallback(async () => {
+    const ok = await requestLocationPermission();
+    if (!ok) {
+      Alert.alert('권한 필요', '설정에서 위치 권한을 허용해주세요.');
+      return;
+    }
+
+    navigator.geolocation.getCurrentPosition(
+      pos => {
+        const { latitude, longitude } = pos.coords;
+        moveTo(latitude, longitude, 0.02);
+      },
+      err => {
+        Alert.alert(
+          '위치 확인 실패',
+          err?.message ?? '현재 위치를 가져오지 못했습니다.',
+        );
+      },
+      { enableHighAccuracy: true, timeout: 10000, maximumAge: 5000 },
+    );
+  }, [moveTo, requestLocationPermission]);
+
+  // 초기 진입 시 한 번 내 위치로 이동하고 싶다면 주석 해제
+  // useEffect(() => {
+  //   locateMe();
+  // }, [locateMe]);
+
+  // TODO: api 연동
+  const onSearch = useCallback(async () => {
     // --- 데모 데이터(현재 로직 최대한 유지)
     const demo = [
       {
@@ -100,23 +142,25 @@ export default function MainScreen() {
       },
     ];
 
-    const filtered = demo.filter(
+    // 상태 필터만 샘플로 적용
+    let filtered = demo.filter(
       m => liveStatus === '전체' || m.status === liveStatus,
     );
+
+    // (선택) chargerType/feeType/region에 따른 추가 필터를 여기서 적용
+    // e.g., if (chargerType !== '전체') filtered = filtered.filter(m => m.speed === chargerType);
+
     setMarkers(filtered);
 
-    // 검색 후 카메라를 결과 범위로 살짝 이동하고 싶으면:
+    // 결과 중심으로 카메라 이동
     if (filtered.length > 0) {
       const latAvg = filtered.reduce((s, m) => s + m.lat, 0) / filtered.length;
       const lngAvg = filtered.reduce((s, m) => s + m.lng, 0) / filtered.length;
-      setMapRegion(r => ({
-        ...r,
-        latitude: latAvg,
-        longitude: lngAvg,
-      }));
+      moveTo(latAvg, lngAvg, 0.03);
     }
-  }, [liveStatus]);
+  }, [liveStatus, moveTo]);
 
+  // ========== 시트 옵션 ==========
   const sheetData = useMemo(
     () => ({
       charger: {
@@ -161,16 +205,37 @@ export default function MainScreen() {
           '세종',
         ],
         value: region,
-        onSelect: v => {
+        onSelect: async v => {
           setRegion(v);
           close();
+
+          // "내 근처" 선택 시 즉시 현재 위치로
+          if (v === '내 근처') {
+            await locateMe();
+          } else {
+            // (선택) 주요 권역별 중앙 좌표 프리셋으로 점프
+            const presets = {
+              서울: { lat: 37.5665, lng: 126.978, zoom: 0.15 },
+              경기: { lat: 37.4138, lng: 127.5183, zoom: 0.35 },
+              인천: { lat: 37.4563, lng: 126.7052, zoom: 0.2 },
+              부산: { lat: 35.1796, lng: 129.0756, zoom: 0.2 },
+              대구: { lat: 35.8714, lng: 128.6014, zoom: 0.2 },
+              대전: { lat: 36.3504, lng: 127.3845, zoom: 0.2 },
+              광주: { lat: 35.1595, lng: 126.8526, zoom: 0.2 },
+              울산: { lat: 35.5384, lng: 129.3114, zoom: 0.22 },
+              세종: { lat: 36.48, lng: 127.289, zoom: 0.22 },
+            };
+            if (presets[v]) {
+              const { lat, lng, zoom } = presets[v];
+              moveTo(lat, lng, zoom);
+            }
+          }
         },
       },
     }),
-    [chargerType, feeType, liveStatus, region],
+    [chargerType, feeType, liveStatus, region, locateMe, moveTo],
   );
 
-  // TODO: status 백엔드 응답에 따라 고치기
   // 마커 색상(상태에 따라)
   const pinColorOf = status => {
     if (status === '사용가능') return '#10B981'; // green
@@ -178,6 +243,7 @@ export default function MainScreen() {
     return '#EF4444'; // red or default
   };
 
+  // ========== 렌더 ==========
   return (
     <SafeAreaView style={styles.root}>
       <ScrollView
@@ -247,12 +313,10 @@ export default function MainScreen() {
                     <View style={styles.calloutWrap}>
                       <Text style={styles.coTitle}>{m.name || '충전소'}</Text>
 
-                      {/* 주소 */}
                       <Text style={styles.coRow}>
                         📍 {m.address || '주소 정보 없음'}
                       </Text>
 
-                      {/* 대수/가능여부 */}
                       <Text style={styles.coRow}>
                         🧩 대수: {m.chargers ?? '-'}{' '}
                         {typeof m.available === 'number'
@@ -260,24 +324,19 @@ export default function MainScreen() {
                           : ''}
                       </Text>
 
-                      {/* 급/완속 */}
                       <Text style={styles.coRow}>
                         ⚡ 유형: {m.speed || '정보 없음'}
                       </Text>
 
-                      {/* 금액 */}
                       <Text style={styles.coRow}>
                         💰 금액: {m.price || '정보 없음'}
                       </Text>
 
-                      {/* 상태 뱃지 */}
                       <View style={styles.badges}>
                         <View
                           style={[
                             styles.badge,
-                            {
-                              backgroundColor: pinColorOf(m.status),
-                            },
+                            { backgroundColor: pinColorOf(m.status) },
                           ]}
                         >
                           <Text style={styles.badgeText}>
@@ -291,27 +350,30 @@ export default function MainScreen() {
               ))}
             </MapView>
 
-            {/* 줌 컨트롤 */}
+            {/* 줌 컨트롤 (동작 보정) */}
             <View style={styles.fabs}>
+              {/* + : 더 확대 → delta 감소 (하한선 적용) */}
               <TouchableOpacity
                 style={styles.fab}
                 onPress={() =>
                   setMapRegion(r => ({
                     ...r,
-                    latitudeDelta: r.latitudeDelta * 0.7,
-                    longitudeDelta: r.longitudeDelta * 0.7,
+                    latitudeDelta: Math.max(r.latitudeDelta * 0.7, 0.004),
+                    longitudeDelta: Math.max(r.longitudeDelta * 0.7, 0.004),
                   }))
                 }
               >
                 <Text style={styles.fabSign}>＋</Text>
               </TouchableOpacity>
+
+              {/* − : 축소 → delta 증가 (상한선 적용) */}
               <TouchableOpacity
                 style={styles.fab}
                 onPress={() =>
                   setMapRegion(r => ({
                     ...r,
-                    latitudeDelta: Math.min(r.latitudeDelta / 0.7, 0.3),
-                    longitudeDelta: Math.min(r.longitudeDelta / 0.7, 0.3),
+                    latitudeDelta: Math.min(r.latitudeDelta / 0.7, 0.6),
+                    longitudeDelta: Math.min(r.longitudeDelta / 0.7, 0.6),
                   }))
                 }
               >
@@ -366,7 +428,6 @@ const styles = StyleSheet.create({
   btnGhostText: { color: '#ffffff', fontWeight: '700', fontSize: 18 },
   btnText: { fontSize: 16 },
 
-  // 지도 카드
   mapCard: {
     marginTop: 16,
     marginHorizontal: 16,
@@ -378,7 +439,7 @@ const styles = StyleSheet.create({
     elevation: 6,
   },
   mapBox: {
-    height: 470,
+    height: 500,
     borderRadius: 20,
     overflow: 'hidden',
   },
@@ -408,7 +469,6 @@ const styles = StyleSheet.create({
     includeFontPadding: false,
   },
 
-  // Callout
   calloutWrap: {
     maxWidth: 260,
     backgroundColor: '#111827',
