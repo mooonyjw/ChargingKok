@@ -16,6 +16,12 @@ import MapView, { Marker, Callout, PROVIDER_GOOGLE } from 'react-native-maps';
 import FilterSheet from '../components/FilterSheet';
 import SelectField from '../components/SelectField';
 
+// ---- Backend base URL (adjust the IP for your dev machine when testing on device) ----
+const BASE_URL =
+  Platform.OS === 'android'
+    ? 'http://10.0.2.2:4000' // Android emulator -> host machine
+    : 'http://localhost:4000'; // iOS simulator or change to your LAN IP when on device
+
 export default function MainScreen() {
   const [visibleSheet, setVisibleSheet] = useState(null); // 'charger' | 'fee' | 'status' | 'region'
   const [chargerType, setChargerType] = useState('전체');
@@ -23,6 +29,8 @@ export default function MainScreen() {
   const [liveStatus, setLiveStatus] = useState('전체');
   const [region, setRegion] = useState('전체');
   const [markers, setMarkers] = useState([]);
+
+  const [lastUpdated, setLastUpdated] = useState(null);
 
   const [mapRegion, setMapRegion] = useState({
     latitude: 37.3943,
@@ -100,66 +108,63 @@ export default function MainScreen() {
   //   locateMe();
   // }, [locateMe]);
 
-  // TODO: api 연동
-  const onSearch = useCallback(async () => {
-    // --- 데모 데이터(현재 로직 최대한 유지)
-    const demo = [
-      {
-        id: '1',
-        lat: 37.4999,
-        lng: 127.0365,
-        name: '강남구청 급속',
-        status: '사용가능',
-        address: '서울 강남구 학동로 426',
-        chargers: 6,
-        available: 4,
-        speed: '급속',
-        price: '300원/kWh',
-      },
-      {
-        id: '2',
-        lat: 37.495,
-        lng: 127.028,
-        name: '역삼역 공영주차장',
-        status: '충전중',
-        address: '서울 강남구 테헤란로 145',
-        chargers: 8,
-        available: 1,
-        speed: '혼합',
-        price: '유료(주차요금 별도)',
-      },
-      {
-        id: '3',
-        lat: 37.507,
-        lng: 127.03,
-        name: '선릉공원 완속',
-        status: '사용가능',
-        address: '서울 강남구 삼성로 623',
-        chargers: 10,
-        available: 7,
-        speed: '완속',
-        price: '무료',
-      },
-    ];
+  const [isLoading, setIsLoading] = useState(false);
 
-    // 상태 필터만 샘플로 적용
-    let filtered = demo.filter(
-      m => liveStatus === '전체' || m.status === liveStatus,
-    );
+  const onSearch = useCallback(
+    async (opts = { force: false }) => {
+      const { latitude, longitude, latitudeDelta } = mapRegion;
+      setIsLoading(true);
+      try {
+        const qs = new URLSearchParams({
+          lat: String(latitude),
+          lng: String(longitude),
+          n: '2',
+          force: String(!!opts.force),
+        });
+        const res = await fetch(`${BASE_URL}/stations/live?${qs.toString()}`);
+        if (!res.ok) throw new Error(`HTTP ${res.status}`);
+        const { items, updatedAt } = await res.json();
 
-    // (선택) chargerType/feeType/region에 따른 추가 필터를 여기서 적용
-    // e.g., if (chargerType !== '전체') filtered = filtered.filter(m => m.speed === chargerType);
+        // ★ 빈 결과면 기존 마커 유지해서 '깜빡임' 방지
+        if (Array.isArray(items) && items.length > 0) {
+          setMarkers(items);
+          setLastUpdated(updatedAt || null);
 
-    setMarkers(filtered);
-
-    // 결과 중심으로 카메라 이동
-    if (filtered.length > 0) {
-      const latAvg = filtered.reduce((s, m) => s + m.lat, 0) / filtered.length;
-      const lngAvg = filtered.reduce((s, m) => s + m.lng, 0) / filtered.length;
-      moveTo(latAvg, lngAvg, 0.03);
+          const latAvg = items.reduce((s, m) => s + m.lat, 0) / items.length;
+          const lngAvg = items.reduce((s, m) => s + m.lng, 0) / items.length;
+          moveTo(latAvg, lngAvg, Math.min(latitudeDelta, 0.03));
+        } else {
+          // 토스트만 안내 (기존 마커 그대로)
+          Alert.alert('실시간 데이터 없음', '잠시 후 다시 시도해 주세요.');
+        }
+      } catch (e) {
+        // 실패해도 기존 마커 유지
+        Alert.alert('검색 실패', '실시간 데이터를 불러오지 못했습니다.');
+        console.error(e);
+      } finally {
+        setIsLoading(false);
+      }
+    },
+    [mapRegion, moveTo],
+  );
+  const formatKST = iso => {
+    if (!iso) return '';
+    try {
+      const d = new Date(iso);
+      const hh = String(d.getHours()).padStart(2, '0');
+      const mm = String(d.getMinutes()).padStart(2, '0');
+      const ss = String(d.getSeconds()).padStart(2, '0');
+      return `${hh}:${mm}:${ss}`;
+    } catch {
+      return '';
     }
-  }, [liveStatus, moveTo]);
+  };
 
+  useEffect(() => {
+    if (region === '서울') {
+      onSearch({ force: false }); // 캐시 허용(빠르게)
+    }
+  }, [region, onSearch]);
   // ========== 시트 옵션 ==========
   const sheetData = useMemo(
     () => ({
@@ -212,6 +217,7 @@ export default function MainScreen() {
           // "내 근처" 선택 시 즉시 현재 위치로
           if (v === '내 근처') {
             await locateMe();
+            onSearch({ force: false }); // 위치 이동 직후 캐시 기반 검색
           } else {
             // (선택) 주요 권역별 중앙 좌표 프리셋으로 점프
             const presets = {
@@ -275,7 +281,7 @@ export default function MainScreen() {
           <View style={styles.actions}>
             <TouchableOpacity
               style={[styles.btn, styles.btnPrimary]}
-              onPress={onSearch}
+              onPress={() => onSearch({ force: false })}
             >
               <Text style={[styles.btnText, styles.btnPrimaryText]}>검색</Text>
             </TouchableOpacity>
@@ -284,6 +290,18 @@ export default function MainScreen() {
               onPress={onReset}
             >
               <Text style={[styles.btnText, styles.btnGhostText]}>초기화</Text>
+            </TouchableOpacity>
+          </View>
+
+          <View style={styles.liveRow}>
+            <Text style={styles.liveText}>
+              업데이트: {lastUpdated ? formatKST(lastUpdated) : '—'}
+            </Text>
+            <TouchableOpacity
+              style={[styles.btnMini]}
+              onPress={() => onSearch({ force: true })}
+            >
+              <Text style={styles.btnMiniText}>새로고침</Text>
             </TouchableOpacity>
           </View>
         </View>
@@ -439,7 +457,7 @@ const styles = StyleSheet.create({
     elevation: 6,
   },
   mapBox: {
-    height: 500,
+    height: 470,
     borderRadius: 20,
     overflow: 'hidden',
   },
@@ -493,4 +511,29 @@ const styles = StyleSheet.create({
     borderRadius: 999,
   },
   badgeText: { color: '#fff', fontSize: 12, fontWeight: '700' },
+
+  liveRow: {
+    marginTop: 8,
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'space-between',
+  },
+  liveText: {
+    fontSize: 12,
+    color: '#6B7280',
+    paddingHorizontal: 2,
+  },
+  btnMini: {
+    paddingHorizontal: 12,
+    height: 30,
+    borderRadius: 16,
+    backgroundColor: '#111827',
+    alignItems: 'center',
+    justifyContent: 'center',
+  },
+  btnMiniText: {
+    color: '#fff',
+    fontWeight: '700',
+    fontSize: 12,
+  },
 });
