@@ -1,5 +1,10 @@
-// src/screens/MainScreen.js
-import React, { useMemo, useState, useCallback, useEffect } from 'react';
+import React, {
+  useMemo,
+  useState,
+  useCallback,
+  useEffect,
+  useRef,
+} from 'react';
 import {
   SafeAreaView,
   View,
@@ -16,11 +21,64 @@ import MapView, { Marker, Callout, PROVIDER_GOOGLE } from 'react-native-maps';
 import FilterSheet from '../components/FilterSheet';
 import SelectField from '../components/SelectField';
 
-// ---- Backend base URL (adjust the IP for your dev machine when testing on device) ----
+// ---- Backend base URL (실기기면 PC의 LAN IP로 바꾸세요) ----
 const BASE_URL =
-  Platform.OS === 'android'
-    ? 'http://10.0.2.2:4000' // Android emulator -> host machine
-    : 'http://localhost:4000'; // iOS simulator or change to your LAN IP when on device
+  Platform.OS === 'android' ? 'http://10.0.2.2:4000' : 'http://localhost:4000';
+
+// === 프론트 → 백엔드 필터 매핑 ===
+const mapStatusToEnum = label => {
+  if (label === '사용가능') return 'AVAILABLE';
+  if (label === '충전중') return 'CHARGING';
+  if (label === '사용불가') return 'UNAVAILABLE';
+  return null; // '전체'
+};
+const mapChargerToTypes = label => {
+  if (label === '완속') return ['AC_SLOW'];
+  if (label === '급속') return ['DC_COMBO', 'CHADEMO', 'DC_FAST', 'HPC'];
+  return null; // '전체'
+};
+const mapFeeToEnum = label => {
+  if (label === '무료') return 'FREE';
+  if (label === '유료') return 'PAID';
+  return null; // '전체'
+};
+
+// ---- 성능 도움: Marker 컴포넌트 메모이제이션 ----
+const MarkerItem = React.memo(function MarkerItem({ m, pinColor }) {
+  return (
+    <Marker
+      key={m.id}
+      coordinate={{ latitude: m.lat, longitude: m.lng }}
+      pinColor={pinColor}
+      // 기본 말풍선 유발하는 title/description 제거!
+      // title={m.name || '충전소'}
+      // description={m.status || ''}
+      tracksViewChanges={false}
+      stopPropagation={true}
+      // 필요 시 말풍선 위치 보정 (안드로이드에서 유용)
+      // anchor={{ x: 0.5, y: 1 }}
+      // calloutAnchor={{ x: 0.5, y: 0 }}
+    >
+      <Callout tooltip>
+        <View style={styles.calloutWrap}>
+          <Text style={styles.coTitle}>{m.name || '충전소'}</Text>
+          <Text style={styles.coRow}>📍 {m.address || '주소 정보 없음'}</Text>
+          <Text style={styles.coRow}>
+            🧩 대수: {m.chargers ?? '-'}
+            {typeof m.available === 'number' ? ` (가능 ${m.available})` : ''}
+          </Text>
+          <Text style={styles.coRow}>⚡ 유형: {m.speed || '정보 없음'}</Text>
+          <Text style={styles.coRow}>💰 금액: {m.price || '정보 없음'}</Text>
+          <View style={styles.badges}>
+            <View style={[styles.badge, { backgroundColor: pinColor }]}>
+              <Text style={styles.badgeText}>{m.status || '상태 미확인'}</Text>
+            </View>
+          </View>
+        </View>
+      </Callout>
+    </Marker>
+  );
+});
 
 export default function MainScreen() {
   const [visibleSheet, setVisibleSheet] = useState(null); // 'charger' | 'fee' | 'status' | 'region'
@@ -28,8 +86,8 @@ export default function MainScreen() {
   const [feeType, setFeeType] = useState('전체');
   const [liveStatus, setLiveStatus] = useState('전체');
   const [region, setRegion] = useState('전체');
-  const [markers, setMarkers] = useState([]);
 
+  const [markers, setMarkers] = useState([]);
   const [lastUpdated, setLastUpdated] = useState(null);
 
   const [mapRegion, setMapRegion] = useState({
@@ -40,6 +98,8 @@ export default function MainScreen() {
   });
 
   const tabBarHeight = useBottomTabBarHeight();
+  const [isLoading, setIsLoading] = useState(false);
+  const pendingReq = useRef(false); // 검색 중복 방지 플래그
 
   const open = key => () => setVisibleSheet(key);
   const close = () => setVisibleSheet(null);
@@ -50,6 +110,7 @@ export default function MainScreen() {
     setLiveStatus('전체');
     setRegion('전체');
     setMarkers([]);
+    setLastUpdated(null);
   }, []);
 
   // ========== 위치 권한 & 내 위치 이동 ==========
@@ -80,14 +141,12 @@ export default function MainScreen() {
     }));
   }, []);
 
-  // TODO: 실제 휴대폰에서 테스트 필요
   const locateMe = useCallback(async () => {
     const ok = await requestLocationPermission();
     if (!ok) {
       Alert.alert('권한 필요', '설정에서 위치 권한을 허용해주세요.');
       return;
     }
-
     navigator.geolocation.getCurrentPosition(
       pos => {
         const { latitude, longitude } = pos.coords;
@@ -103,50 +162,86 @@ export default function MainScreen() {
     );
   }, [moveTo, requestLocationPermission]);
 
-  // 초기 진입 시 한 번 내 위치로 이동하고 싶다면 주석 해제
-  // useEffect(() => {
-  //   locateMe();
-  // }, [locateMe]);
-
-  const [isLoading, setIsLoading] = useState(false);
+  // ====== 검색 ======
+  // 화면 줌에 따라 자동 반경 산정 (대략값, 최소 3km ~ 최대 25km)
+  const calcRadiusMeters = useCallback(latDelta => {
+    const meters = latDelta * 111000; // 위도 1도 ≒ 111km
+    return Math.max(3000, Math.min(25000, Math.round(meters * 0.8)));
+  }, []);
 
   const onSearch = useCallback(
     async (opts = { force: false }) => {
-      const { latitude, longitude, latitudeDelta } = mapRegion;
+      if (pendingReq.current) return;
+      pendingReq.current = true;
       setIsLoading(true);
+
       try {
+        const { latitude, longitude, latitudeDelta } = mapRegion;
+
+        const statusEnum = mapStatusToEnum(liveStatus);
+        const types = mapChargerToTypes(chargerType);
+        const feeEnum = mapFeeToEnum(feeType);
+
         const qs = new URLSearchParams({
           lat: String(latitude),
           lng: String(longitude),
-          n: '2',
+          radius: String(calcRadiusMeters(latitudeDelta)),
+          n: '3',
           force: String(!!opts.force),
         });
-        const res = await fetch(`${BASE_URL}/stations/live?${qs.toString()}`);
+        if (statusEnum) qs.set('status', statusEnum);
+        if (feeEnum) qs.set('fee', feeEnum);
+        if (Array.isArray(types) && types.length)
+          qs.set('type', types.join(','));
+
+        const url = `${BASE_URL}/stations/live?${qs.toString()}`;
+        // console.log('[REQ]', url);
+
+        const res = await fetch(url);
         if (!res.ok) throw new Error(`HTTP ${res.status}`);
         const { items, updatedAt } = await res.json();
 
-        // ★ 빈 결과면 기존 마커 유지해서 '깜빡임' 방지
         if (Array.isArray(items) && items.length > 0) {
-          setMarkers(items);
+          // 이전 결과와 동일하면 setState 생략 (리렌더 절약)
+          const same =
+            items.length === markers.length &&
+            items.every((it, i) => it.id === markers[i]?.id);
+
+          if (!same) setMarkers(items);
           setLastUpdated(updatedAt || null);
 
+          // 지도의 줌/센터를 과하게 건드리지 않도록: 결과가 화면에 이미 있으면 이동 생략
+          // (필요 시만 평균으로 스무스 이동)
           const latAvg = items.reduce((s, m) => s + m.lat, 0) / items.length;
           const lngAvg = items.reduce((s, m) => s + m.lng, 0) / items.length;
-          moveTo(latAvg, lngAvg, Math.min(latitudeDelta, 0.03));
+          if (
+            Math.abs(latAvg - latitude) > mapRegion.latitudeDelta * 0.2 ||
+            Math.abs(lngAvg - longitude) > mapRegion.longitudeDelta * 0.2
+          ) {
+            moveTo(latAvg, lngAvg, Math.min(latitudeDelta, 0.03));
+          }
         } else {
-          // 토스트만 안내 (기존 마커 그대로)
-          Alert.alert('실시간 데이터 없음', '잠시 후 다시 시도해 주세요.');
+          Alert.alert('결과 없음', '조건에 맞는 실시간 충전소가 없습니다.');
         }
       } catch (e) {
-        // 실패해도 기존 마커 유지
         Alert.alert('검색 실패', '실시간 데이터를 불러오지 못했습니다.');
         console.error(e);
       } finally {
         setIsLoading(false);
+        pendingReq.current = false;
       }
     },
-    [mapRegion, moveTo],
+    [
+      mapRegion,
+      moveTo,
+      liveStatus,
+      chargerType,
+      feeType,
+      markers,
+      calcRadiusMeters,
+    ],
   );
+
   const formatKST = iso => {
     if (!iso) return '';
     try {
@@ -160,12 +255,7 @@ export default function MainScreen() {
     }
   };
 
-  useEffect(() => {
-    if (region === '서울') {
-      onSearch({ force: false }); // 캐시 허용(빠르게)
-    }
-  }, [region, onSearch]);
-  // ========== 시트 옵션 ==========
+  // ====== 시트 옵션 ======
   const sheetData = useMemo(
     () => ({
       charger: {
@@ -214,12 +304,9 @@ export default function MainScreen() {
           setRegion(v);
           close();
 
-          // "내 근처" 선택 시 즉시 현재 위치로
           if (v === '내 근처') {
             await locateMe();
-            onSearch({ force: false }); // 위치 이동 직후 캐시 기반 검색
           } else {
-            // (선택) 주요 권역별 중앙 좌표 프리셋으로 점프
             const presets = {
               서울: { lat: 37.5665, lng: 126.978, zoom: 0.15 },
               경기: { lat: 37.4138, lng: 127.5183, zoom: 0.35 },
@@ -242,14 +329,49 @@ export default function MainScreen() {
     [chargerType, feeType, liveStatus, region, locateMe, moveTo],
   );
 
-  // 마커 색상(상태에 따라)
+  // ====== 마커 색상 ======
   const pinColorOf = status => {
     if (status === '사용가능') return '#10B981'; // green
-    if (status === '충전중') return '#F59E0B'; // amber
-    return '#EF4444'; // red or default
+    if (status === '충전중') return '#F59E0B'; // orange
+    if (status === '정보없음') return '#FACC15'; // yellow
+    return '#EF4444'; // red (사용불가 등)
   };
 
-  // ========== 렌더 ==========
+  // ====== 화면 내 마커만 렌더 + 격자 샘플링 ======
+  const visibleMarkers = useMemo(() => {
+    if (!markers.length) return [];
+
+    const { latitude, longitude, latitudeDelta, longitudeDelta } = mapRegion;
+
+    // 화면 경계(조금 여유 padding)
+    const pad = 0.1;
+    const minLat = latitude - latitudeDelta * (0.5 + pad);
+    const maxLat = latitude + latitudeDelta * (0.5 + pad);
+    const minLng = longitude - longitudeDelta * (0.5 + pad);
+    const maxLng = longitude + longitudeDelta * (0.5 + pad);
+
+    const inView = markers.filter(
+      m =>
+        m.lat >= minLat &&
+        m.lat <= maxLat &&
+        m.lng >= minLng &&
+        m.lng <= maxLng,
+    );
+
+    // 화면에 너무 많으면(예: 800개+) 격자 샘플링으로 간단히 희소화
+    const MAX_RENDER = 400;
+    if (inView.length <= MAX_RENDER) return inView;
+
+    const cell = Math.max(latitudeDelta, longitudeDelta) * 0.04; // 격자 크기(줌에 따라)
+    const bucket = new Map();
+    for (const m of inView) {
+      const ky = `${Math.floor(m.lat / cell)}:${Math.floor(m.lng / cell)}`;
+      if (!bucket.has(ky)) bucket.set(ky, m); // 각 칸 첫 번째만 사용
+    }
+    return Array.from(bucket.values()).slice(0, MAX_RENDER);
+  }, [markers, mapRegion]);
+
+  // ====== 렌더 ======
   return (
     <SafeAreaView style={styles.root}>
       <ScrollView
@@ -280,10 +402,17 @@ export default function MainScreen() {
 
           <View style={styles.actions}>
             <TouchableOpacity
-              style={[styles.btn, styles.btnPrimary]}
+              style={[
+                styles.btn,
+                styles.btnPrimary,
+                isLoading && { opacity: 0.7 },
+              ]}
               onPress={() => onSearch({ force: false })}
+              disabled={isLoading}
             >
-              <Text style={[styles.btnText, styles.btnPrimaryText]}>검색</Text>
+              <Text style={[styles.btnText, styles.btnPrimaryText]}>
+                {isLoading ? '검색중...' : '검색'}
+              </Text>
             </TouchableOpacity>
             <TouchableOpacity
               style={[styles.btn, styles.btnGhost]}
@@ -318,59 +447,15 @@ export default function MainScreen() {
               showsUserLocation
               showsMyLocationButton={false}
               toolbarEnabled={false}
+              moveOnMarkerPress={false}
             >
-              {markers.map(m => (
-                <Marker
-                  key={m.id}
-                  coordinate={{ latitude: m.lat, longitude: m.lng }}
-                  title={m.name || '충전소'}
-                  description={m.status || ''}
-                  pinColor={pinColorOf(m.status)}
-                >
-                  <Callout tooltip>
-                    <View style={styles.calloutWrap}>
-                      <Text style={styles.coTitle}>{m.name || '충전소'}</Text>
-
-                      <Text style={styles.coRow}>
-                        📍 {m.address || '주소 정보 없음'}
-                      </Text>
-
-                      <Text style={styles.coRow}>
-                        🧩 대수: {m.chargers ?? '-'}{' '}
-                        {typeof m.available === 'number'
-                          ? `(가능 ${m.available})`
-                          : ''}
-                      </Text>
-
-                      <Text style={styles.coRow}>
-                        ⚡ 유형: {m.speed || '정보 없음'}
-                      </Text>
-
-                      <Text style={styles.coRow}>
-                        💰 금액: {m.price || '정보 없음'}
-                      </Text>
-
-                      <View style={styles.badges}>
-                        <View
-                          style={[
-                            styles.badge,
-                            { backgroundColor: pinColorOf(m.status) },
-                          ]}
-                        >
-                          <Text style={styles.badgeText}>
-                            {m.status || '상태 미확인'}
-                          </Text>
-                        </View>
-                      </View>
-                    </View>
-                  </Callout>
-                </Marker>
+              {visibleMarkers.map(m => (
+                <MarkerItem key={m.id} m={m} pinColor={pinColorOf(m.status)} />
               ))}
             </MapView>
 
-            {/* 줌 컨트롤 (동작 보정) */}
+            {/* 줌 컨트롤 */}
             <View style={styles.fabs}>
-              {/* + : 더 확대 → delta 감소 (하한선 적용) */}
               <TouchableOpacity
                 style={styles.fab}
                 onPress={() =>
@@ -384,7 +469,6 @@ export default function MainScreen() {
                 <Text style={styles.fabSign}>＋</Text>
               </TouchableOpacity>
 
-              {/* − : 축소 → delta 증가 (상한선 적용) */}
               <TouchableOpacity
                 style={styles.fab}
                 onPress={() =>
@@ -493,23 +577,10 @@ const styles = StyleSheet.create({
     padding: 12,
     borderRadius: 12,
   },
-  coTitle: {
-    color: '#fff',
-    fontSize: 16,
-    fontWeight: '700',
-    marginBottom: 6,
-  },
-  coRow: {
-    color: '#E5E7EB',
-    fontSize: 13,
-    marginTop: 2,
-  },
+  coTitle: { color: '#fff', fontSize: 16, fontWeight: '700', marginBottom: 6 },
+  coRow: { color: '#E5E7EB', fontSize: 13, marginTop: 2 },
   badges: { flexDirection: 'row', gap: 8, marginTop: 10 },
-  badge: {
-    paddingHorizontal: 8,
-    paddingVertical: 4,
-    borderRadius: 999,
-  },
+  badge: { paddingHorizontal: 8, paddingVertical: 4, borderRadius: 999 },
   badgeText: { color: '#fff', fontSize: 12, fontWeight: '700' },
 
   liveRow: {
@@ -518,11 +589,7 @@ const styles = StyleSheet.create({
     alignItems: 'center',
     justifyContent: 'space-between',
   },
-  liveText: {
-    fontSize: 12,
-    color: '#6B7280',
-    paddingHorizontal: 2,
-  },
+  liveText: { fontSize: 12, color: '#6B7280', paddingHorizontal: 2 },
   btnMini: {
     paddingHorizontal: 12,
     height: 30,
@@ -531,9 +598,5 @@ const styles = StyleSheet.create({
     alignItems: 'center',
     justifyContent: 'center',
   },
-  btnMiniText: {
-    color: '#fff',
-    fontWeight: '700',
-    fontSize: 12,
-  },
+  btnMiniText: { color: '#fff', fontWeight: '700', fontSize: 12 },
 });
