@@ -1,3 +1,4 @@
+// src/screens/MainScreen.js
 import React, {
   useMemo,
   useState,
@@ -50,14 +51,9 @@ const MarkerItem = React.memo(function MarkerItem({ m, pinColor }) {
       key={m.id}
       coordinate={{ latitude: m.lat, longitude: m.lng }}
       pinColor={pinColor}
-      // 기본 말풍선 유발하는 title/description 제거!
-      // title={m.name || '충전소'}
-      // description={m.status || ''}
+      // title/description 생략해 말풍선 강제 렌더 방지
       tracksViewChanges={false}
       stopPropagation={true}
-      // 필요 시 말풍선 위치 보정 (안드로이드에서 유용)
-      // anchor={{ x: 0.5, y: 1 }}
-      // calloutAnchor={{ x: 0.5, y: 0 }}
     >
       <Callout tooltip>
         <View style={styles.calloutWrap}>
@@ -111,7 +107,32 @@ export default function MainScreen() {
     setRegion('전체');
     setMarkers([]);
     setLastUpdated(null);
+    setShowSearchHere(false);
+    lastSearchedRegionRef.current = null;
   }, []);
+
+  // === "이 지역에서 검색" 상태 ===
+  const lastSearchedRegionRef = useRef(null); // 마지막으로 검색을 수행했던 region
+  const [showSearchHere, setShowSearchHere] = useState(false);
+  const regionIdleTimer = useRef(null);
+
+  // 두 영역이 충분히 다른지 판단 (센터 이동 + 줌 변화 기준)
+  const isRegionSignificantlyDifferent = (a, b) => {
+    if (!a || !b) return true;
+    const centerDiffLat = Math.abs(a.latitude - b.latitude);
+    const centerDiffLng = Math.abs(a.longitude - b.longitude);
+    const zoomDiffLat = Math.abs(a.latitudeDelta - b.latitudeDelta);
+    const zoomDiffLng = Math.abs(a.longitudeDelta - b.longitudeDelta);
+
+    const centerMoved =
+      centerDiffLat > a.latitudeDelta * 0.15 ||
+      centerDiffLng > a.longitudeDelta * 0.15;
+    const zoomChanged =
+      zoomDiffLat > a.latitudeDelta * 0.3 ||
+      zoomDiffLng > a.longitudeDelta * 0.3;
+
+    return centerMoved || zoomChanged;
+  };
 
   // ========== 위치 권한 & 내 위치 이동 ==========
   const requestLocationPermission = useCallback(async () => {
@@ -186,7 +207,6 @@ export default function MainScreen() {
           lat: String(latitude),
           lng: String(longitude),
           radius: String(calcRadiusMeters(latitudeDelta)),
-          n: '3',
           force: String(!!opts.force),
         });
         if (statusEnum) qs.set('status', statusEnum);
@@ -194,15 +214,11 @@ export default function MainScreen() {
         if (Array.isArray(types) && types.length)
           qs.set('type', types.join(','));
 
-        const url = `${BASE_URL}/stations/live?${qs.toString()}`;
-        // console.log('[REQ]', url);
-
-        const res = await fetch(url);
+        const res = await fetch(`${BASE_URL}/stations/live?${qs.toString()}`);
         if (!res.ok) throw new Error(`HTTP ${res.status}`);
         const { items, updatedAt } = await res.json();
 
         if (Array.isArray(items) && items.length > 0) {
-          // 이전 결과와 동일하면 setState 생략 (리렌더 절약)
           const same =
             items.length === markers.length &&
             items.every((it, i) => it.id === markers[i]?.id);
@@ -210,8 +226,11 @@ export default function MainScreen() {
           if (!same) setMarkers(items);
           setLastUpdated(updatedAt || null);
 
-          // 지도의 줌/센터를 과하게 건드리지 않도록: 결과가 화면에 이미 있으면 이동 생략
-          // (필요 시만 평균으로 스무스 이동)
+          // ✅ 이 시점이 "마지막 검색 기준"이 됨
+          lastSearchedRegionRef.current = mapRegion;
+          setShowSearchHere(false);
+
+          // 결과 중심으로 부드럽게 이동 (필요할 때만)
           const latAvg = items.reduce((s, m) => s + m.lat, 0) / items.length;
           const lngAvg = items.reduce((s, m) => s + m.lng, 0) / items.length;
           if (
@@ -241,6 +260,12 @@ export default function MainScreen() {
       calcRadiusMeters,
     ],
   );
+
+  // "이 지역에서 검색" 버튼 눌렀을 때
+  const handleSearchHere = useCallback(() => {
+    onSearch({ force: false });
+    // onSearch 성공 시점에 lastSearchedRegionRef/버튼 상태를 갱신함
+  }, [onSearch]);
 
   const formatKST = iso => {
     if (!iso) return '';
@@ -343,7 +368,6 @@ export default function MainScreen() {
 
     const { latitude, longitude, latitudeDelta, longitudeDelta } = mapRegion;
 
-    // 화면 경계(조금 여유 padding)
     const pad = 0.1;
     const minLat = latitude - latitudeDelta * (0.5 + pad);
     const maxLat = latitude + latitudeDelta * (0.5 + pad);
@@ -358,15 +382,14 @@ export default function MainScreen() {
         m.lng <= maxLng,
     );
 
-    // 화면에 너무 많으면(예: 800개+) 격자 샘플링으로 간단히 희소화
     const MAX_RENDER = 400;
     if (inView.length <= MAX_RENDER) return inView;
 
-    const cell = Math.max(latitudeDelta, longitudeDelta) * 0.04; // 격자 크기(줌에 따라)
+    const cell = Math.max(latitudeDelta, longitudeDelta) * 0.04;
     const bucket = new Map();
     for (const m of inView) {
       const ky = `${Math.floor(m.lat / cell)}:${Math.floor(m.lng / cell)}`;
-      if (!bucket.has(ky)) bucket.set(ky, m); // 각 칸 첫 번째만 사용
+      if (!bucket.has(ky)) bucket.set(ky, m);
     }
     return Array.from(bucket.values()).slice(0, MAX_RENDER);
   }, [markers, mapRegion]);
@@ -443,7 +466,17 @@ export default function MainScreen() {
               provider={PROVIDER_GOOGLE}
               initialRegion={mapRegion}
               region={mapRegion}
-              onRegionChangeComplete={setMapRegion}
+              onRegionChangeComplete={r => {
+                setMapRegion(r);
+
+                // 사용자가 멈춘 뒤에 판단(디바운스)
+                if (regionIdleTimer.current)
+                  clearTimeout(regionIdleTimer.current);
+                regionIdleTimer.current = setTimeout(() => {
+                  const last = lastSearchedRegionRef.current;
+                  setShowSearchHere(isRegionSignificantlyDifferent(r, last));
+                }, 350);
+              }}
               showsUserLocation
               showsMyLocationButton={false}
               toolbarEnabled={false}
@@ -482,6 +515,21 @@ export default function MainScreen() {
                 <Text style={styles.fabSign}>−</Text>
               </TouchableOpacity>
             </View>
+
+            {/* "이 지역에서 검색" 버튼 (네이버 지도 UX 유사) */}
+            {showSearchHere && (
+              <View pointerEvents="box-none" style={styles.searchHereWrap}>
+                <TouchableOpacity
+                  onPress={handleSearchHere}
+                  activeOpacity={0.9}
+                  style={styles.searchHereBtn}
+                >
+                  <Text style={styles.searchHereText}>
+                    이 지역에서 검색하기
+                  </Text>
+                </TouchableOpacity>
+              </View>
+            )}
           </View>
         </View>
       </ScrollView>
@@ -599,4 +647,30 @@ const styles = StyleSheet.create({
     justifyContent: 'center',
   },
   btnMiniText: { color: '#fff', fontWeight: '700', fontSize: 12 },
+
+  // "이 지역에서 검색" UI
+  searchHereWrap: {
+    position: 'absolute',
+    left: 0,
+    right: 0,
+    bottom: 18,
+    alignItems: 'center',
+  },
+  searchHereBtn: {
+    paddingHorizontal: 14,
+    height: 38,
+    borderRadius: 999,
+    backgroundColor: '#111827',
+    alignItems: 'center',
+    justifyContent: 'center',
+    shadowColor: '#000',
+    shadowOpacity: 0.15,
+    shadowRadius: 6,
+    elevation: 6,
+  },
+  searchHereText: {
+    color: '#fff',
+    fontWeight: '800',
+    letterSpacing: 0.2,
+  },
 });
