@@ -1,5 +1,11 @@
 // src/screens/MainScreen.js
-import React, { useMemo, useState, useCallback, useEffect } from 'react';
+import React, {
+  useMemo,
+  useState,
+  useCallback,
+  useEffect,
+  useRef,
+} from 'react';
 import {
   SafeAreaView,
   View,
@@ -13,33 +19,89 @@ import {
 } from 'react-native';
 import { useBottomTabBarHeight } from '@react-navigation/bottom-tabs';
 import MapView, { Marker, Callout, PROVIDER_GOOGLE } from 'react-native-maps';
+import Geolocation from 'react-native-geolocation-service';
 import FilterSheet from '../components/FilterSheet';
 import SelectField from '../components/SelectField';
 
-// ---- Backend base URL (adjust the IP for your dev machine when testing on device) ----
+// ---- Backend base URL ----
 const BASE_URL =
-  Platform.OS === 'android'
-    ? 'http://10.0.2.2:4000' // Android emulator -> host machine
-    : 'http://localhost:4000'; // iOS simulator or change to your LAN IP when on device
+  Platform.OS === 'android' ? 'http://10.0.2.2:4000' : 'http://localhost:4000';
+
+// === 프론트 → 백엔드 필터 매핑 ===
+const mapStatusToEnum = label => {
+  if (label === '사용가능') return 'AVAILABLE';
+  if (label === '충전중') return 'CHARGING';
+  if (label === '사용불가') return 'UNAVAILABLE';
+  return null; // '전체'
+};
+const mapChargerToTypes = label => {
+  if (label === '완속') return ['AC_SLOW'];
+  if (label === '급속') return ['DC_COMBO', 'CHADEMO', 'DC_FAST', 'HPC'];
+  return null; // '전체'
+};
+const mapFeeToEnum = label => {
+  if (label === '무료') return 'FREE';
+  if (label === '유료') return 'PAID';
+  return null; // '전체'
+};
+
+// ---- 성능 도움: Marker 메모이제이션 ----
+const MarkerItem = React.memo(function MarkerItem({ m, pinColor }) {
+  return (
+    <Marker
+      key={m.id}
+      coordinate={{ latitude: m.lat, longitude: m.lng }}
+      pinColor={pinColor}
+      tracksViewChanges={false}
+      stopPropagation
+    >
+      <Callout tooltip>
+        <View style={styles.calloutWrap}>
+          <Text style={styles.coTitle}>{m.name || '충전소'}</Text>
+          <Text style={styles.coRow}>📍 {m.address || '주소 정보 없음'}</Text>
+          <Text style={styles.coRow}>
+            🧩 대수: {m.chargers ?? '-'}
+            {typeof m.available === 'number' ? ` (가능 ${m.available})` : ''}
+          </Text>
+          <Text style={styles.coRow}>⚡ 유형: {m.speed || '정보 없음'}</Text>
+          <Text style={styles.coRow}>💰 금액: {m.price || '정보 없음'}</Text>
+          <View style={styles.badges}>
+            <View style={[styles.badge, { backgroundColor: pinColor }]}>
+              <Text style={styles.badgeText}>{m.status || '상태 미확인'}</Text>
+            </View>
+          </View>
+        </View>
+      </Callout>
+    </Marker>
+  );
+});
 
 export default function MainScreen() {
+  const mapRef = useRef(null);
+
   const [visibleSheet, setVisibleSheet] = useState(null); // 'charger' | 'fee' | 'status' | 'region'
   const [chargerType, setChargerType] = useState('전체');
   const [feeType, setFeeType] = useState('전체');
   const [liveStatus, setLiveStatus] = useState('전체');
   const [region, setRegion] = useState('전체');
-  const [markers, setMarkers] = useState([]);
 
+  const [markers, setMarkers] = useState([]);
   const [lastUpdated, setLastUpdated] = useState(null);
 
-  const [mapRegion, setMapRegion] = useState({
-    latitude: 37.3943,
-    longitude: 127.1107,
-    latitudeDelta: 0.04,
-    longitudeDelta: 0.04,
-  });
+  // 초기엔 null → 첫 위치 획득 후 설정(첫 렌더에서 내 위치로)
+  const [mapRegion, setMapRegion] = useState(null);
 
   const tabBarHeight = useBottomTabBarHeight();
+  const [isLoading, setIsLoading] = useState(false);
+  const pendingReq = useRef(false); // 검색 중복 방지
+
+  // "이 지역에서 검색하기" 배너 컨트롤
+  const [hasSearched, setHasSearched] = useState(false); // ✅ 최초 검색 전엔 배너 비활성
+  const lastSearchedRegionRef = useRef(null);
+  const [showSearchHere, setShowSearchHere] = useState(false);
+  const regionIdleTimer = useRef(null);
+
+  const [isLocating, setIsLocating] = useState(false);
 
   const open = key => () => setVisibleSheet(key);
   const close = () => setVisibleSheet(null);
@@ -50,9 +112,13 @@ export default function MainScreen() {
     setLiveStatus('전체');
     setRegion('전체');
     setMarkers([]);
+    setLastUpdated(null);
+    lastSearchedRegionRef.current = null;
+    setShowSearchHere(false);
+    setHasSearched(false);
   }, []);
 
-  // ========== 위치 권한 & 내 위치 이동 ==========
+  // === 위치 권한 ===
   const requestLocationPermission = useCallback(async () => {
     if (Platform.OS !== 'android') return true;
     try {
@@ -71,82 +137,137 @@ export default function MainScreen() {
   }, []);
 
   const moveTo = useCallback((lat, lng, zoom = 0.02) => {
-    setMapRegion(r => ({
-      ...r,
+    const next = {
       latitude: lat,
       longitude: lng,
       latitudeDelta: zoom,
       longitudeDelta: zoom,
-    }));
-  }, []);
+    };
 
-  // TODO: 실제 휴대폰에서 테스트 필요
-  const locateMe = useCallback(async () => {
-    const ok = await requestLocationPermission();
-    if (!ok) {
-      Alert.alert('권한 필요', '설정에서 위치 권한을 허용해주세요.');
-      return;
+    // 1) 애니메이션으로 즉시 화면 이동 (체감 확실)
+    if (mapRef.current?.animateToRegion) {
+      mapRef.current.animateToRegion(next, 350);
     }
 
-    navigator.geolocation.getCurrentPosition(
-      pos => {
-        const { latitude, longitude } = pos.coords;
-        moveTo(latitude, longitude, 0.02);
-      },
-      err => {
-        Alert.alert(
-          '위치 확인 실패',
-          err?.message ?? '현재 위치를 가져오지 못했습니다.',
-        );
-      },
-      { enableHighAccuracy: true, timeout: 10000, maximumAge: 5000 },
-    );
-  }, [moveTo, requestLocationPermission]);
+    // 2) 상태도 업데이트(제어형 region 유지)
+    setMapRegion(prev => (prev ? { ...prev, ...next } : next));
+  }, []);
 
-  // 초기 진입 시 한 번 내 위치로 이동하고 싶다면 주석 해제
-  // useEffect(() => {
-  //   locateMe();
-  // }, [locateMe]);
+  const locateMe = useCallback(
+    async ({ alsoSearch = false } = {}) => {
+      const ok = await requestLocationPermission();
+      if (!ok) {
+        Alert.alert('권한 필요', '설정에서 위치 권한을 허용해주세요.');
+        return;
+      }
+      setIsLocating(true);
 
-  const [isLoading, setIsLoading] = useState(false);
+      Geolocation.getCurrentPosition(
+        async pos => {
+          const { latitude, longitude } = pos.coords;
+          moveTo(latitude, longitude, 0.02);
+          setIsLocating(false);
+          if (alsoSearch) {
+            setTimeout(() => onSearch({ force: false }), 120);
+          }
+        },
+        err => {
+          setIsLocating(false);
+          console.warn('[geo] getCurrentPosition error:', err);
+          // 실패 시: fallback (서울시청)
+          moveTo(37.5665, 126.978, 0.05);
+          Alert.alert(
+            '위치 확인 실패',
+            err?.message ?? '현재 위치를 가져오지 못했습니다.',
+          );
+        },
+        {
+          enableHighAccuracy: true,
+          timeout: 10000,
+          maximumAge: 3000,
+          forceRequestLocation: true,
+          showLocationDialog: true,
+        },
+      );
+    },
+    [moveTo, onSearch, requestLocationPermission],
+  );
+
+  // === 앱 첫 진입: 내 위치로 포커스 + 자동 검색
+  useEffect(() => {
+    locateMe({ alsoSearch: true });
+  }, [locateMe]);
+
+  // ====== 검색 ======
+  // 줌 → 반경(m)
+  const calcRadiusMeters = useCallback(latDelta => {
+    const meters = latDelta * 111000;
+    return Math.max(3000, Math.min(25000, Math.round(meters * 0.8)));
+  }, []);
 
   const onSearch = useCallback(
     async (opts = { force: false }) => {
-      const { latitude, longitude, latitudeDelta } = mapRegion;
+      if (!mapRegion) return;
+      if (pendingReq.current) return;
+      pendingReq.current = true;
       setIsLoading(true);
+      setHasSearched(true); // ✅ 이 순간부터 지도 이동 시 배너 표시 로직 활성화
+
       try {
+        const { latitude, longitude, latitudeDelta } = mapRegion;
+
+        const statusEnum = mapStatusToEnum(liveStatus);
+        const types = mapChargerToTypes(chargerType);
+        const feeEnum = mapFeeToEnum(feeType);
+
         const qs = new URLSearchParams({
           lat: String(latitude),
           lng: String(longitude),
-          n: '2',
-          force: String(!!opts.force),
+          radius: String(calcRadiusMeters(latitudeDelta)),
         });
-        const res = await fetch(`${BASE_URL}/stations/live?${qs.toString()}`);
+        if (statusEnum) qs.set('status', statusEnum);
+        if (feeEnum) qs.set('fee', feeEnum);
+        if (Array.isArray(types) && types.length)
+          qs.set('type', types.join(','));
+
+        const url = `${BASE_URL}/stations/live?${qs.toString()}`;
+
+        const res = await fetch(url);
         if (!res.ok) throw new Error(`HTTP ${res.status}`);
         const { items, updatedAt } = await res.json();
 
-        // ★ 빈 결과면 기존 마커 유지해서 '깜빡임' 방지
         if (Array.isArray(items) && items.length > 0) {
-          setMarkers(items);
+          const same =
+            items.length === markers.length &&
+            items.every((it, i) => it.id === markers[i]?.id);
+          if (!same) setMarkers(items);
           setLastUpdated(updatedAt || null);
 
-          const latAvg = items.reduce((s, m) => s + m.lat, 0) / items.length;
-          const lngAvg = items.reduce((s, m) => s + m.lng, 0) / items.length;
-          moveTo(latAvg, lngAvg, Math.min(latitudeDelta, 0.03));
+          // 이 지점을 검색한 것으로 기록 → 배너 숨김
+          lastSearchedRegionRef.current = mapRegion;
+          setShowSearchHere(false);
         } else {
-          // 토스트만 안내 (기존 마커 그대로)
-          Alert.alert('실시간 데이터 없음', '잠시 후 다시 시도해 주세요.');
+          Alert.alert('결과 없음', '조건에 맞는 실시간 충전소가 없습니다.');
         }
       } catch (e) {
-        // 실패해도 기존 마커 유지
         Alert.alert('검색 실패', '실시간 데이터를 불러오지 못했습니다.');
         console.error(e);
       } finally {
         setIsLoading(false);
+        pendingReq.current = false;
       }
     },
-    [mapRegion, moveTo],
+    [
+      mapRegion,
+      liveStatus,
+      chargerType,
+      feeType,
+      markers,
+      calcRadiusMeters,
+      BASE_URL,
+    ],
   );
+
   const formatKST = iso => {
     if (!iso) return '';
     try {
@@ -160,12 +281,7 @@ export default function MainScreen() {
     }
   };
 
-  useEffect(() => {
-    if (region === '서울') {
-      onSearch({ force: false }); // 캐시 허용(빠르게)
-    }
-  }, [region, onSearch]);
-  // ========== 시트 옵션 ==========
+  // ====== 시트 옵션 ======
   const sheetData = useMemo(
     () => ({
       charger: {
@@ -214,12 +330,9 @@ export default function MainScreen() {
           setRegion(v);
           close();
 
-          // "내 근처" 선택 시 즉시 현재 위치로
           if (v === '내 근처') {
             await locateMe();
-            onSearch({ force: false }); // 위치 이동 직후 캐시 기반 검색
           } else {
-            // (선택) 주요 권역별 중앙 좌표 프리셋으로 점프
             const presets = {
               서울: { lat: 37.5665, lng: 126.978, zoom: 0.15 },
               경기: { lat: 37.4138, lng: 127.5183, zoom: 0.35 },
@@ -242,14 +355,53 @@ export default function MainScreen() {
     [chargerType, feeType, liveStatus, region, locateMe, moveTo],
   );
 
-  // 마커 색상(상태에 따라)
+  // ====== 마커 색상 ======
   const pinColorOf = status => {
     if (status === '사용가능') return '#10B981'; // green
-    if (status === '충전중') return '#F59E0B'; // amber
-    return '#EF4444'; // red or default
+    if (status === '충전중') return '#F59E0B'; // orange
+    if (status === '정보없음') return '#FACC15'; // yellow
+    return '#EF4444'; // red (사용불가 등)
   };
 
-  // ========== 렌더 ==========
+  // ====== 화면 내 마커만 렌더 + 격자 샘플링 ======
+  const visibleMarkers = useMemo(() => {
+    if (!markers.length || !mapRegion) return [];
+    const { latitude, longitude, latitudeDelta, longitudeDelta } = mapRegion;
+
+    const pad = 0.1;
+    const minLat = latitude - latitudeDelta * (0.5 + pad);
+    const maxLat = latitude + latitudeDelta * (0.5 + pad);
+    const minLng = longitude - longitudeDelta * (0.5 + pad);
+    const maxLng = longitude + longitudeDelta * (0.5 + pad);
+
+    const inView = markers.filter(
+      m =>
+        m.lat >= minLat &&
+        m.lat <= maxLat &&
+        m.lng >= minLng &&
+        m.lng <= maxLng,
+    );
+
+    const MAX_RENDER = 400;
+    if (inView.length <= MAX_RENDER) return inView;
+
+    const cell = Math.max(latitudeDelta, longitudeDelta) * 0.04;
+    const bucket = new Map();
+    for (const m of inView) {
+      const ky = `${Math.floor(m.lat / cell)}:${Math.floor(m.lng / cell)}`;
+      if (!bucket.has(ky)) bucket.set(ky, m);
+    }
+    return Array.from(bucket.values()).slice(0, MAX_RENDER);
+  }, [markers, mapRegion]);
+
+  // ====== 렌더 ======
+  const fallbackRegion = {
+    latitude: 37.5665, // 서울시청
+    longitude: 126.978,
+    latitudeDelta: 0.1,
+    longitudeDelta: 0.1,
+  };
+
   return (
     <SafeAreaView style={styles.root}>
       <ScrollView
@@ -280,10 +432,17 @@ export default function MainScreen() {
 
           <View style={styles.actions}>
             <TouchableOpacity
-              style={[styles.btn, styles.btnPrimary]}
+              style={[
+                styles.btn,
+                styles.btnPrimary,
+                isLoading && { opacity: 0.7 },
+              ]}
               onPress={() => onSearch({ force: false })}
+              disabled={isLoading}
             >
-              <Text style={[styles.btnText, styles.btnPrimaryText]}>검색</Text>
+              <Text style={[styles.btnText, styles.btnPrimaryText]}>
+                {isLoading ? '검색중...' : '검색'}
+              </Text>
             </TouchableOpacity>
             <TouchableOpacity
               style={[styles.btn, styles.btnGhost]}
@@ -310,93 +469,61 @@ export default function MainScreen() {
         <View style={styles.mapCard}>
           <View style={styles.mapBox}>
             <MapView
+              ref={mapRef}
               style={{ flex: 1 }}
               provider={PROVIDER_GOOGLE}
-              initialRegion={mapRegion}
-              region={mapRegion}
-              onRegionChangeComplete={setMapRegion}
+              region={mapRegion || fallbackRegion} // ✅ 초기엔 fallback, 위치 획득 후 내 위치
+              onRegionChangeComplete={r => {
+                setMapRegion(prev => (prev ? { ...prev, ...r } : r));
+                if (!hasSearched) return; // ✅ 첫 검색 전엔 배너 숨김
+
+                // 사용자가 멈춘 뒤 판단(디바운스)
+                if (regionIdleTimer.current)
+                  clearTimeout(regionIdleTimer.current);
+                regionIdleTimer.current = setTimeout(() => {
+                  const last = lastSearchedRegionRef.current;
+                  setShowSearchHere(isRegionSignificantlyDifferent(r, last));
+                }, 350);
+              }}
               showsUserLocation
               showsMyLocationButton={false}
               toolbarEnabled={false}
+              moveOnMarkerPress={false}
             >
-              {markers.map(m => (
-                <Marker
-                  key={m.id}
-                  coordinate={{ latitude: m.lat, longitude: m.lng }}
-                  title={m.name || '충전소'}
-                  description={m.status || ''}
-                  pinColor={pinColorOf(m.status)}
-                >
-                  <Callout tooltip>
-                    <View style={styles.calloutWrap}>
-                      <Text style={styles.coTitle}>{m.name || '충전소'}</Text>
-
-                      <Text style={styles.coRow}>
-                        📍 {m.address || '주소 정보 없음'}
-                      </Text>
-
-                      <Text style={styles.coRow}>
-                        🧩 대수: {m.chargers ?? '-'}{' '}
-                        {typeof m.available === 'number'
-                          ? `(가능 ${m.available})`
-                          : ''}
-                      </Text>
-
-                      <Text style={styles.coRow}>
-                        ⚡ 유형: {m.speed || '정보 없음'}
-                      </Text>
-
-                      <Text style={styles.coRow}>
-                        💰 금액: {m.price || '정보 없음'}
-                      </Text>
-
-                      <View style={styles.badges}>
-                        <View
-                          style={[
-                            styles.badge,
-                            { backgroundColor: pinColorOf(m.status) },
-                          ]}
-                        >
-                          <Text style={styles.badgeText}>
-                            {m.status || '상태 미확인'}
-                          </Text>
-                        </View>
-                      </View>
-                    </View>
-                  </Callout>
-                </Marker>
+              {visibleMarkers.map(m => (
+                <MarkerItem key={m.id} m={m} pinColor={pinColorOf(m.status)} />
               ))}
             </MapView>
 
-            {/* 줌 컨트롤 (동작 보정) */}
-            <View style={styles.fabs}>
-              {/* + : 더 확대 → delta 감소 (하한선 적용) */}
-              <TouchableOpacity
-                style={styles.fab}
-                onPress={() =>
-                  setMapRegion(r => ({
-                    ...r,
-                    latitudeDelta: Math.max(r.latitudeDelta * 0.7, 0.004),
-                    longitudeDelta: Math.max(r.longitudeDelta * 0.7, 0.004),
-                  }))
-                }
-              >
-                <Text style={styles.fabSign}>＋</Text>
-              </TouchableOpacity>
+            {/* === 오버레이: 하단 중앙 배너 + 우측 하단 내 위치 === */}
+            <View style={styles.mapOverlay} pointerEvents="box-none">
+              {/* 하단 중앙 "이 지역에서 검색하기" */}
+              {hasSearched && showSearchHere && (
+                <View
+                  style={styles.searchHereCenterWrap}
+                  pointerEvents="box-none"
+                >
+                  <TouchableOpacity
+                    style={styles.searchHereCenterBtn}
+                    onPress={() => onSearch({ force: false })}
+                  >
+                    <Text style={styles.searchHereText}>
+                      이 지역에서 검색하기
+                    </Text>
+                  </TouchableOpacity>
+                </View>
+              )}
 
-              {/* − : 축소 → delta 증가 (상한선 적용) */}
-              <TouchableOpacity
-                style={styles.fab}
-                onPress={() =>
-                  setMapRegion(r => ({
-                    ...r,
-                    latitudeDelta: Math.min(r.latitudeDelta / 0.7, 0.6),
-                    longitudeDelta: Math.min(r.longitudeDelta / 0.7, 0.6),
-                  }))
-                }
-              >
-                <Text style={styles.fabSign}>−</Text>
-              </TouchableOpacity>
+              {/* 우측 하단: 내 위치 버튼 */}
+              <View style={styles.fabsBottomRight}>
+                <TouchableOpacity
+                  style={[styles.fabLocate, isLocating && { opacity: 0.7 }]}
+                  onPress={() => locateMe({ alsoSearch: true })}
+                  disabled={isLocating}
+                >
+                  <Text style={styles.locateIcon}>◎</Text>
+                </TouchableOpacity>
+              </View>
             </View>
           </View>
         </View>
@@ -413,6 +540,21 @@ export default function MainScreen() {
       )}
     </SafeAreaView>
   );
+}
+
+// 센터/줌 변화가 충분한지 판단
+function isRegionSignificantlyDifferent(a, b) {
+  if (!a || !b) return true;
+  const centerDiffLat = Math.abs(a.latitude - b.latitude);
+  const centerDiffLng = Math.abs(a.longitude - b.longitude);
+  const zoomDiffLat = Math.abs(a.latitudeDelta - b.latitudeDelta);
+  const zoomDiffLng = Math.abs(a.longitudeDelta - b.longitudeDelta);
+  const centerMoved =
+    centerDiffLat > a.latitudeDelta * 0.15 ||
+    centerDiffLng > a.longitudeDelta * 0.15;
+  const zoomChanged =
+    zoomDiffLat > a.latitudeDelta * 0.3 || zoomDiffLng > a.longitudeDelta * 0.3;
+  return centerMoved || zoomChanged;
 }
 
 const styles = StyleSheet.create({
@@ -461,17 +603,54 @@ const styles = StyleSheet.create({
     borderRadius: 20,
     overflow: 'hidden',
   },
-  fabs: {
+
+  // === 오버레이 레이어 ===
+  mapOverlay: {
+    position: 'absolute',
+    left: 0,
+    right: 0,
+    top: 0,
+    bottom: 0,
+    zIndex: 5,
+  },
+
+  // 하단 중앙 배너
+  searchHereCenterWrap: {
+    position: 'absolute',
+    left: 0,
+    right: 0,
+    bottom: 12,
+    alignItems: 'center',
+  },
+  searchHereCenterBtn: {
+    backgroundColor: '#111827',
+    paddingHorizontal: 14,
+    paddingVertical: 10,
+    borderRadius: 999,
+    shadowColor: '#000',
+    shadowOpacity: 0.15,
+    shadowRadius: 6,
+    elevation: 6,
+  },
+  searchHereText: {
+    color: '#fff',
+    fontWeight: '700',
+    fontSize: 12,
+  },
+
+  // 우측 하단 FAB 영역
+  fabsBottomRight: {
     position: 'absolute',
     right: 12,
-    top: 12,
+    bottom: 12,
     gap: 10,
+    alignItems: 'flex-end',
   },
-  fab: {
-    width: 42,
-    height: 42,
-    borderRadius: 21,
-    backgroundColor: '#0E9F6E',
+  fabLocate: {
+    width: 44,
+    height: 44,
+    borderRadius: 22,
+    backgroundColor: '#111827',
     alignItems: 'center',
     justifyContent: 'center',
     shadowColor: '#000',
@@ -479,37 +658,24 @@ const styles = StyleSheet.create({
     shadowRadius: 6,
     elevation: 6,
   },
-  fabSign: {
+  locateIcon: {
     color: '#fff',
-    fontSize: 20,
+    fontSize: 18,
     fontWeight: '700',
-    lineHeight: 22,
     includeFontPadding: false,
   },
 
+  // Callout
   calloutWrap: {
     maxWidth: 260,
     backgroundColor: '#111827',
     padding: 12,
     borderRadius: 12,
   },
-  coTitle: {
-    color: '#fff',
-    fontSize: 16,
-    fontWeight: '700',
-    marginBottom: 6,
-  },
-  coRow: {
-    color: '#E5E7EB',
-    fontSize: 13,
-    marginTop: 2,
-  },
+  coTitle: { color: '#fff', fontSize: 16, fontWeight: '700', marginBottom: 6 },
+  coRow: { color: '#E5E7EB', fontSize: 13, marginTop: 2 },
   badges: { flexDirection: 'row', gap: 8, marginTop: 10 },
-  badge: {
-    paddingHorizontal: 8,
-    paddingVertical: 4,
-    borderRadius: 999,
-  },
+  badge: { paddingHorizontal: 8, paddingVertical: 4, borderRadius: 999 },
   badgeText: { color: '#fff', fontSize: 12, fontWeight: '700' },
 
   liveRow: {
@@ -518,11 +684,8 @@ const styles = StyleSheet.create({
     alignItems: 'center',
     justifyContent: 'space-between',
   },
-  liveText: {
-    fontSize: 12,
-    color: '#6B7280',
-    paddingHorizontal: 2,
-  },
+  liveText: { fontSize: 12, color: '#6B7280', paddingHorizontal: 2 },
+
   btnMini: {
     paddingHorizontal: 12,
     height: 30,
@@ -531,9 +694,5 @@ const styles = StyleSheet.create({
     alignItems: 'center',
     justifyContent: 'center',
   },
-  btnMiniText: {
-    color: '#fff',
-    fontWeight: '700',
-    fontSize: 12,
-  },
+  btnMiniText: { color: '#fff', fontWeight: '700', fontSize: 12 },
 });

@@ -111,8 +111,18 @@ dependencies {
     // The version of react-native is set by the React Native Gradle Plugin
     implementation("com.facebook.react:react-android")
 
-      implementation "com.google.android.gms:play-services-maps:18.2.0"
-  implementation "com.google.maps.android:maps-utils-ktx:5.1.1"
+    implementation "com.google.android.gms:play-services-maps:18.2.0"
+    implementation "com.google.maps.android:maps-utils-ktx:5.1.1"
+
+    implementation(project(":react-native-geolocation-service")) {
+        exclude group: "com.google.android.gms", module: "play-services-location"
+    }
+    implementation(project(":react-native-maps")) {
+        exclude group: "com.google.android.gms", module: "play-services-location"
+    }
+
+    // 우리가 지정한 딱 한 버전만 사용
+    implementation "com.google.android.gms:play-services-location:21.3.0"
 
     if (hermesEnabled.toBoolean()) {
         implementation("com.facebook.react:hermes-android")
