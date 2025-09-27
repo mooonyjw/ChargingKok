@@ -22,6 +22,7 @@ import MapView, { Marker, Callout, PROVIDER_GOOGLE } from 'react-native-maps';
 import Geolocation from 'react-native-geolocation-service';
 import FilterSheet from '../components/FilterSheet';
 import SelectField from '../components/SelectField';
+import { LocationService } from '../services/LocationService';
 
 // ---- Backend base URL ----
 const BASE_URL =
@@ -153,46 +154,83 @@ export default function MainScreen() {
     setMapRegion(prev => (prev ? { ...prev, ...next } : next));
   }, []);
 
+  // const locateMe = useCallback(
+  //   async ({ alsoSearch = false } = {}) => {
+  //     const ok = await requestLocationPermission();
+  //     if (!ok) {
+  //       Alert.alert('권한 필요', '설정에서 위치 권한을 허용해주세요.');
+  //       return;
+  //     }
+  //     setIsLocating(true);
+
+  //     Geolocation.getCurrentPosition(
+  //       async pos => {
+  //         const { latitude, longitude } = pos.coords;
+  //         moveTo(latitude, longitude, 0.02);
+  //         setIsLocating(false);
+  //         if (alsoSearch) {
+  //           setTimeout(() => onSearch({ force: false }), 120);
+  //         }
+  //       },
+  //       err => {
+  //         setIsLocating(false);
+  //         console.warn('[geo] getCurrentPosition error:', err);
+  //         // 실패 시: fallback (서울시청)
+  //         moveTo(37.5665, 126.978, 0.05);
+  //         Alert.alert(
+  //           '위치 확인 실패',
+  //           err?.message ?? '현재 위치를 가져오지 못했습니다.',
+  //         );
+  //       },
+  //       {
+  //         enableHighAccuracy: true,
+  //         timeout: 10000,
+  //         maximumAge: 3000,
+  //         forceRequestLocation: true,
+  //         showLocationDialog: true,
+  //       },
+  //     );
+  //   },
+  //   [moveTo, onSearch, requestLocationPermission],
+  // );
   const locateMe = useCallback(
     async ({ alsoSearch = false } = {}) => {
-      const ok = await requestLocationPermission();
-      if (!ok) {
-        Alert.alert('권한 필요', '설정에서 위치 권한을 허용해주세요.');
-        return;
-      }
       setIsLocating(true);
 
-      Geolocation.getCurrentPosition(
-        async pos => {
-          const { latitude, longitude } = pos.coords;
-          moveTo(latitude, longitude, 0.02);
-          setIsLocating(false);
-          if (alsoSearch) {
-            setTimeout(() => onSearch({ force: false }), 120);
-          }
-        },
-        err => {
-          setIsLocating(false);
-          console.warn('[geo] getCurrentPosition error:', err);
-          // 실패 시: fallback (서울시청)
-          moveTo(37.5665, 126.978, 0.05);
-          Alert.alert(
-            '위치 확인 실패',
-            err?.message ?? '현재 위치를 가져오지 못했습니다.',
-          );
-        },
-        {
-          enableHighAccuracy: true,
-          timeout: 10000,
-          maximumAge: 3000,
-          forceRequestLocation: true,
-          showLocationDialog: true,
-        },
-      );
-    },
-    [moveTo, onSearch, requestLocationPermission],
-  );
+      try {
+        // LocationService 통해 현재 위치 가져오기
+        const { latitude, longitude, isEmulatorFallback } =
+          await LocationService.getCurrentLocation();
 
+        // 지도 이동
+        moveTo(latitude, longitude, 0.02);
+
+        // 검색 옵션 실행
+        if (alsoSearch) {
+          setTimeout(() => onSearch({ force: false }), 120);
+        }
+
+        if (isEmulatorFallback) {
+          // Alert.alert(
+          //   '기본 위치로 이동',
+          //   '현재 위치를 찾을 수 없어서 서울 중심지로 이동했어요. 🗺️',
+          // );
+          console.log('📍 Using fallback location (Seoul City Hall)');
+        }
+      } catch (err) {
+        console.warn('[locateMe] 위치 확인 실패:', err);
+        // 실패 시 fallback
+        moveTo(37.5665, 126.978, 0.05);
+        Alert.alert(
+          '위치 확인 실패',
+          err?.message ?? '현재 위치를 가져오지 못했습니다.',
+        );
+      } finally {
+        setIsLocating(false);
+      }
+    },
+    [moveTo, onSearch],
+  );
   // === 앱 첫 진입: 내 위치로 포커스 + 자동 검색
   useEffect(() => {
     locateMe({ alsoSearch: true });
@@ -264,8 +302,7 @@ export default function MainScreen() {
       feeType,
       markers,
       calcRadiusMeters,
-      BASE_URL,
-    ],
+    ]
   );
 
   const formatKST = iso => {

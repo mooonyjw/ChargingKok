@@ -3,7 +3,7 @@ import Config from 'react-native-config';
 
 const GEMINI_API_KEY = Config.GEMINI_API_KEY;
 const GEMINI_API_URL =
-  `https://generativelanguage.googleapis.com/v1beta/models/gemini-1.5-flash:generateContent?key=${GEMINI_API_KEY}`;
+  `https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash:generateContent?key=${GEMINI_API_KEY}`;
 
 export async function pingGemini() {
   const res = await fetch(GEMINI_API_URL, {
