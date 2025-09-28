@@ -7,6 +7,7 @@ import LoginScreen from './src/screens/LoginScreen';
 import SignUpScreen from './src/screens/SignUpScreen';
 import MyPageScreen from './src/screens/MyPageScreen';
 import MainPageScreen from './src/screens/MainPageScreen';
+import ChatBotScreen from './src/screens/ChatBotScreen';
 
 const Stack = createNativeStackNavigator();
 
@@ -15,13 +16,14 @@ export default function App() {
     <NavigationContainer>
       <Stack.Navigator
         screenOptions={{ headerShown: false }}
-        initialRouteName="Welcome"
+        initialRouteName="Main"
       >
         <Stack.Screen name="Welcome" component={WelcomeScreen} />
         <Stack.Screen name="Login" component={LoginScreen} />
         <Stack.Screen name="SignUp" component={SignUpScreen} />
         <Stack.Screen name="MyPage" component={MyPageScreen} />
         <Stack.Screen name="Main" component={MainPageScreen} />
+        <Stack.Screen name="ChatBot" component={ChatBotScreen} />
       </Stack.Navigator>
     </NavigationContainer>
   );
