@@ -23,6 +23,149 @@ import Geolocation from 'react-native-geolocation-service';
 import FilterSheet from '../components/FilterSheet';
 import SelectField from '../components/SelectField';
 
+const MOCK_ITEMS = [
+  {
+    id: 'MOCK001',
+    name: '판교역 북측 광장 공영주차장',
+    address: '성남시 분당구 대왕판교로 606',
+    lat: 37.39621,
+    lng: 127.11188,
+    status: '사용가능',
+    available: 3,
+    busy: 2,
+    down: 1,
+    chargers: 6, // = 3+2+1
+    speed: '급속(100kW), 완속',
+    price: '주차유료',
+  },
+  {
+    id: 'MOCK002',
+    name: '알파돔시티 3단지 지하주차장',
+    address: '성남시 분당구 판교역로 166',
+    lat: 37.39298,
+    lng: 127.11264,
+    status: '충전중',
+    available: 0,
+    busy: 3,
+    down: 1,
+    chargers: 4,
+    speed: '급속(50kW), 완속',
+    price: '주차유료',
+  },
+  {
+    id: 'MOCK003',
+    name: '판교역 환승주차장',
+    address: '성남시 분당구 백현로 95',
+    lat: 37.39544,
+    lng: 127.10967,
+    status: '사용가능',
+    available: 5,
+    busy: 2,
+    down: 1,
+    chargers: 8,
+    speed: '초고속(150kW), 급속',
+    price: '주차유료',
+  },
+  {
+    id: 'MOCK004',
+    name: 'H스퀘어 S동',
+    address: '성남시 분당구 판교로 289',
+    lat: 37.39311,
+    lng: 127.10998,
+    status: '사용불가',
+    available: 0,
+    busy: 0,
+    down: 2,
+    chargers: 2,
+    speed: '급속',
+    price: '주차유료',
+  },
+  {
+    id: 'MOCK005',
+    name: '유스페이스2 주차장',
+    address: '성남시 분당구 대왕판교로 660',
+    lat: 37.39683,
+    lng: 127.11372,
+    status: '사용가능',
+    available: 1,
+    busy: 2,
+    down: 0,
+    chargers: 3,
+    speed: '완속',
+    price: '주차유료',
+  },
+  {
+    id: 'MOCK006',
+    name: '알파리움 상가 주차장',
+    address: '성남시 분당구 판교역로 145',
+    lat: 37.39373,
+    lng: 127.11421,
+    status: '충전중',
+    available: 0,
+    busy: 4,
+    down: 1,
+    chargers: 5,
+    speed: '급속(100kW), 완속',
+    price: '주차유료',
+  },
+  {
+    id: 'MOCK007',
+    name: '판교 테크노파크 공원 주차장',
+    address: '성남시 분당구 판교로 255',
+    lat: 37.39242,
+    lng: 127.11087,
+    status: '사용가능',
+    available: 2,
+    busy: 1,
+    down: 1,
+    chargers: 4,
+    speed: '급속(50kW)',
+    price: '주차무료',
+  },
+  {
+    id: 'MOCK008',
+    name: '현대백화점 판교점 지하주차장',
+    address: '성남시 분당구 판교역로146번길 20',
+    lat: 37.39496,
+    lng: 127.11219,
+    status: '정보없음',
+    available: 0,
+    busy: 0,
+    down: 0,
+    chargers: 6,
+    speed: '완속',
+    price: '',
+  },
+  {
+    id: 'MOCK009',
+    name: 'NHN 플레이뮤지엄',
+    address: '성남시 분당구 대왕판교로645번길 16',
+    lat: 37.39751,
+    lng: 127.11033,
+    status: '사용가능',
+    available: 1,
+    busy: 1,
+    down: 0,
+    chargers: 2,
+    speed: '급속(100kW)',
+    price: '주차유료',
+  },
+  {
+    id: 'MOCK010',
+    name: '판교 제2테크노밸리 공영주차장',
+    address: '성남시 분당구 대왕판교로712번길 22',
+    lat: 37.39818,
+    lng: 127.11304,
+    status: '사용가능',
+    available: 6,
+    busy: 3,
+    down: 1,
+    chargers: 10,
+    speed: '초고속(200kW), 급속',
+    price: '주차유료',
+  },
+];
+
 // ---- Backend base URL ----
 const BASE_URL =
   Platform.OS === 'android' ? 'http://10.0.2.2:4000' : 'http://localhost:4000';
@@ -246,8 +389,23 @@ export default function MainScreen() {
           // 이 지점을 검색한 것으로 기록 → 배너 숨김
           lastSearchedRegionRef.current = mapRegion;
           setShowSearchHere(false);
+
+          const url = `${BASE_URL}/stations/live?${qs.toString()}`;
+          console.log('[search] URL =', url); // ← 보내는 URL 확인
+          const res = await fetch(url);
+          const { items, updatedAt, meta } = await res.json();
+          console.log('[search] items =', items?.length, meta); // ← 몇 개 받았는지
         } else {
-          Alert.alert('결과 없음', '조건에 맞는 실시간 충전소가 없습니다.');
+          // 맨 위 근처에 임시 상수
+
+          // onSearch catch 쪽이나 items.length === 0 분기에서:
+          if (!Array.isArray(items) || items.length === 0) {
+            // 임시: 판교역 기준 목업 주입
+            setMarkers(MOCK_ITEMS);
+            setLastUpdated(new Date().toISOString());
+            // Alert는 잠깐 막기
+            // Alert.alert('결과 없음', '조건에 맞는 실시간 충전소가 없습니다.');
+          }
         }
       } catch (e) {
         Alert.alert('검색 실패', '실시간 데이터를 불러오지 못했습니다.');
@@ -331,7 +489,7 @@ export default function MainScreen() {
           close();
 
           if (v === '내 근처') {
-            await locateMe();
+            await locateMe({ alsoSearch: true });
           } else {
             const presets = {
               서울: { lat: 37.5665, lng: 126.978, zoom: 0.15 },
