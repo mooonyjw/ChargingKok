@@ -23,6 +23,10 @@ import Geolocation from 'react-native-geolocation-service';
 import FilterSheet from '../components/FilterSheet';
 import SelectField from '../components/SelectField';
 
+// ✅ 로컬 JSON(추천 노드) — 파일을 src/data/recommended_nodes.json 에 두세요
+//   예시 포맷: { "matched_nodes": [ { "node_id": 1, "lat": 37.5, "lon": 127.0 }, ... ] }
+import nodesJson from '../data/recommended_nodes.json';
+
 const MOCK_ITEMS = [
   {
     id: 'MOCK001',
@@ -34,7 +38,7 @@ const MOCK_ITEMS = [
     available: 3,
     busy: 2,
     down: 1,
-    chargers: 6, // = 3+2+1
+    chargers: 6,
     speed: '급속(100kW), 완속',
     price: '주차유료',
   },
@@ -219,6 +223,29 @@ const MarkerItem = React.memo(function MarkerItem({ m, pinColor }) {
   );
 });
 
+// 🔵 추천 노드 마커 (파랑)
+const MarkerNode = React.memo(function MarkerNode({ n }) {
+  return (
+    <Marker
+      key={`NODE_${n.node_id}`}
+      coordinate={{ latitude: n.lat, longitude: n.lon }}
+      pinColor={'#00a2ffff'}
+      tracksViewChanges={false}
+      stopPropagation
+    >
+      <Callout>
+        <View style={{ maxWidth: 220 }}>
+          <Text style={{ fontWeight: '700' }}>추천 노드</Text>
+          <Text>ID: {n.node_id}</Text>
+          <Text>
+            ({n.lat.toFixed(6)}, {n.lon.toFixed(6)})
+          </Text>
+        </View>
+      </Callout>
+    </Marker>
+  );
+});
+
 export default function MainScreen() {
   const mapRef = useRef(null);
 
@@ -231,6 +258,10 @@ export default function MainScreen() {
   const [markers, setMarkers] = useState([]);
   const [lastUpdated, setLastUpdated] = useState(null);
 
+  // 추천 노드
+  const [evNodes, setEvNodes] = useState([]);
+  const [showNodes, setShowNodes] = useState(false);
+
   // 초기엔 null → 첫 위치 획득 후 설정(첫 렌더에서 내 위치로)
   const [mapRegion, setMapRegion] = useState(null);
 
@@ -239,7 +270,7 @@ export default function MainScreen() {
   const pendingReq = useRef(false); // 검색 중복 방지
 
   // "이 지역에서 검색하기" 배너 컨트롤
-  const [hasSearched, setHasSearched] = useState(false); // ✅ 최초 검색 전엔 배너 비활성
+  const [hasSearched, setHasSearched] = useState(false);
   const lastSearchedRegionRef = useRef(null);
   const [showSearchHere, setShowSearchHere] = useState(false);
   const regionIdleTimer = useRef(null);
@@ -259,6 +290,9 @@ export default function MainScreen() {
     lastSearchedRegionRef.current = null;
     setShowSearchHere(false);
     setHasSearched(false);
+    // 노드도 초기화
+    setEvNodes([]);
+    setShowNodes(false);
   }, []);
 
   // === 위치 권한 ===
@@ -286,13 +320,9 @@ export default function MainScreen() {
       latitudeDelta: zoom,
       longitudeDelta: zoom,
     };
-
-    // 1) 애니메이션으로 즉시 화면 이동 (체감 확실)
     if (mapRef.current?.animateToRegion) {
       mapRef.current.animateToRegion(next, 350);
     }
-
-    // 2) 상태도 업데이트(제어형 region 유지)
     setMapRegion(prev => (prev ? { ...prev, ...next } : next));
   }, []);
 
@@ -342,89 +372,86 @@ export default function MainScreen() {
   }, [locateMe]);
 
   // ====== 검색 ======
-  // 줌 → 반경(m)
   const calcRadiusMeters = useCallback(latDelta => {
     const meters = latDelta * 111000;
     return Math.max(3000, Math.min(25000, Math.round(meters * 0.8)));
   }, []);
 
-  const onSearch = useCallback(
-    async (opts = { force: false }) => {
-      if (!mapRegion) return;
-      if (pendingReq.current) return;
-      pendingReq.current = true;
-      setIsLoading(true);
-      setHasSearched(true); // ✅ 이 순간부터 지도 이동 시 배너 표시 로직 활성화
+  // ---- 서버 검색 + 목업 폴백
+  const onSearch = useCallback(async () => {
+    if (!mapRegion) return;
+    if (pendingReq.current) return;
+    pendingReq.current = true;
+    setIsLoading(true);
+    setHasSearched(true);
 
-      try {
-        const { latitude, longitude, latitudeDelta } = mapRegion;
+    try {
+      const { latitude, longitude, latitudeDelta } = mapRegion;
 
-        const statusEnum = mapStatusToEnum(liveStatus);
-        const types = mapChargerToTypes(chargerType);
-        const feeEnum = mapFeeToEnum(feeType);
+      const statusEnum = mapStatusToEnum(liveStatus);
+      const types = mapChargerToTypes(chargerType);
+      const feeEnum = mapFeeToEnum(feeType);
 
-        const qs = new URLSearchParams({
-          lat: String(latitude),
-          lng: String(longitude),
-          radius: String(calcRadiusMeters(latitudeDelta)),
-        });
-        if (statusEnum) qs.set('status', statusEnum);
-        if (feeEnum) qs.set('fee', feeEnum);
-        if (Array.isArray(types) && types.length)
-          qs.set('type', types.join(','));
+      const qs = new URLSearchParams({
+        lat: String(latitude),
+        lng: String(longitude),
+        radius: String(calcRadiusMeters(latitudeDelta)),
+      });
+      if (statusEnum) qs.set('status', statusEnum);
+      if (feeEnum) qs.set('fee', feeEnum);
+      if (Array.isArray(types) && types.length) qs.set('type', types.join(','));
 
-        const url = `${BASE_URL}/stations/live?${qs.toString()}`;
+      const url = `${BASE_URL}/stations/live?${qs.toString()}`;
+      console.log('[search] URL =', url);
 
-        const res = await fetch(url);
-        if (!res.ok) throw new Error(`HTTP ${res.status}`);
-        const { items, updatedAt } = await res.json();
+      const res = await fetch(url);
+      if (!res.ok) throw new Error(`HTTP ${res.status}`);
 
-        if (Array.isArray(items) && items.length > 0) {
-          const same =
-            items.length === markers.length &&
-            items.every((it, i) => it.id === markers[i]?.id);
-          if (!same) setMarkers(items);
-          setLastUpdated(updatedAt || null);
+      const { items, updatedAt } = await res.json();
 
-          // 이 지점을 검색한 것으로 기록 → 배너 숨김
-          lastSearchedRegionRef.current = mapRegion;
-          setShowSearchHere(false);
+      if (Array.isArray(items) && items.length > 0) {
+        const same =
+          items.length === markers.length &&
+          items.every((it, i) => it.id === markers[i]?.id);
+        if (!same) setMarkers(items);
+        setLastUpdated(updatedAt || null);
 
-          const url = `${BASE_URL}/stations/live?${qs.toString()}`;
-          console.log('[search] URL =', url); // ← 보내는 URL 확인
-          const res = await fetch(url);
-          const { items, updatedAt, meta } = await res.json();
-          console.log('[search] items =', items?.length, meta); // ← 몇 개 받았는지
-        } else {
-          // 맨 위 근처에 임시 상수
-
-          // onSearch catch 쪽이나 items.length === 0 분기에서:
-          if (!Array.isArray(items) || items.length === 0) {
-            // 임시: 판교역 기준 목업 주입
-            setMarkers(MOCK_ITEMS);
-            setLastUpdated(new Date().toISOString());
-            // Alert는 잠깐 막기
-            // Alert.alert('결과 없음', '조건에 맞는 실시간 충전소가 없습니다.');
-          }
-        }
-      } catch (e) {
-        Alert.alert('검색 실패', '실시간 데이터를 불러오지 못했습니다.');
-        console.error(e);
-      } finally {
-        setIsLoading(false);
-        pendingReq.current = false;
+        lastSearchedRegionRef.current = mapRegion;
+        setShowSearchHere(false);
+      } else {
+        // 결과 0 → 목업 주입
+        setMarkers(MOCK_ITEMS);
+        setLastUpdated(new Date().toISOString());
+        // 지도 중심을 목업 평균으로 이동(가시성)
+        const avgLat =
+          MOCK_ITEMS.reduce((s, m) => s + m.lat, 0) / MOCK_ITEMS.length;
+        const avgLng =
+          MOCK_ITEMS.reduce((s, m) => s + m.lng, 0) / MOCK_ITEMS.length;
+        moveTo(avgLat, avgLng, 0.04);
       }
-    },
-    [
-      mapRegion,
-      liveStatus,
-      chargerType,
-      feeType,
-      markers,
-      calcRadiusMeters,
-      BASE_URL,
-    ],
-  );
+    } catch (e) {
+      console.error('[onSearch] error:', e);
+      // 실패 → 목업
+      setMarkers(MOCK_ITEMS);
+      setLastUpdated(new Date().toISOString());
+      const avgLat =
+        MOCK_ITEMS.reduce((s, m) => s + m.lat, 0) / MOCK_ITEMS.length;
+      const avgLng =
+        MOCK_ITEMS.reduce((s, m) => s + m.lng, 0) / MOCK_ITEMS.length;
+      moveTo(avgLat, avgLng, 0.04);
+    } finally {
+      setIsLoading(false);
+      pendingReq.current = false;
+    }
+  }, [
+    mapRegion,
+    liveStatus,
+    chargerType,
+    feeType,
+    markers,
+    calcRadiusMeters,
+    moveTo,
+  ]);
 
   const formatKST = iso => {
     if (!iso) return '';
@@ -438,6 +465,48 @@ export default function MainScreen() {
       return '';
     }
   };
+
+  // ====== 추천 노드 로드/토글 ======
+  const onToggleNodes = useCallback(() => {
+    // 최초 토글 시 JSON에서 로드
+    if (!showNodes) {
+      const list = Array.isArray(nodesJson?.matched_nodes)
+        ? nodesJson.matched_nodes.filter(
+            n =>
+              typeof n.lat === 'number' &&
+              typeof n.lon === 'number' &&
+              Number.isFinite(n.lat) &&
+              Number.isFinite(n.lon),
+          )
+        : [];
+
+      setEvNodes(list);
+
+      // 화면에 잘 보이도록 fit
+      if (mapRef.current && list.length > 0) {
+        const coords = list.slice(0, 400).map(n => ({
+          latitude: n.lat,
+          longitude: n.lon,
+        }));
+        try {
+          mapRef.current.fitToCoordinates(coords, {
+            edgePadding: { top: 60, right: 60, bottom: 60, left: 60 },
+            animated: true,
+          });
+        } catch (e) {
+          // fit 실패 시 평균 중심으로 이동
+          const avgLat =
+            coords.reduce((s, c) => s + c.latitude, 0) / coords.length;
+          const avgLng =
+            coords.reduce((s, c) => s + c.longitude, 0) / coords.length;
+          moveTo(avgLat, avgLng, 0.08);
+        }
+      }
+      setShowNodes(true);
+    } else {
+      setShowNodes(false);
+    }
+  }, [showNodes, moveTo]);
 
   // ====== 시트 옵션 ======
   const sheetData = useMemo(
@@ -588,6 +657,7 @@ export default function MainScreen() {
             <SelectField label="지역" value={region} onPress={open('region')} />
           </View>
 
+          {/* 액션 버튼들 */}
           <View style={styles.actions}>
             <TouchableOpacity
               style={[
@@ -595,18 +665,31 @@ export default function MainScreen() {
                 styles.btnPrimary,
                 isLoading && { opacity: 0.7 },
               ]}
-              onPress={() => onSearch({ force: false })}
+              onPress={onSearch}
               disabled={isLoading}
             >
               <Text style={[styles.btnText, styles.btnPrimaryText]}>
                 {isLoading ? '검색중...' : '검색'}
               </Text>
             </TouchableOpacity>
+
             <TouchableOpacity
               style={[styles.btn, styles.btnGhost]}
               onPress={onReset}
             >
               <Text style={[styles.btnText, styles.btnGhostText]}>초기화</Text>
+            </TouchableOpacity>
+          </View>
+
+          {/* 추천 노드 토글 버튼 */}
+          <View style={[styles.actions, { marginTop: 8 }]}>
+            <TouchableOpacity
+              style={[styles.btn, styles.btnBlack]}
+              onPress={onToggleNodes}
+            >
+              <Text style={[styles.btnText, styles.btnBlackText]}>
+                {showNodes ? '추천노드 숨기기' : '추천노드 표시'}
+              </Text>
             </TouchableOpacity>
           </View>
 
@@ -616,7 +699,7 @@ export default function MainScreen() {
             </Text>
             <TouchableOpacity
               style={[styles.btnMini]}
-              onPress={() => onSearch({ force: true })}
+              onPress={() => onSearch()}
             >
               <Text style={styles.btnMiniText}>새로고침</Text>
             </TouchableOpacity>
@@ -630,12 +713,10 @@ export default function MainScreen() {
               ref={mapRef}
               style={{ flex: 1 }}
               provider={PROVIDER_GOOGLE}
-              region={mapRegion || fallbackRegion} // ✅ 초기엔 fallback, 위치 획득 후 내 위치
+              region={mapRegion || fallbackRegion}
               onRegionChangeComplete={r => {
                 setMapRegion(prev => (prev ? { ...prev, ...r } : r));
-                if (!hasSearched) return; // ✅ 첫 검색 전엔 배너 숨김
-
-                // 사용자가 멈춘 뒤 판단(디바운스)
+                if (!hasSearched) return;
                 if (regionIdleTimer.current)
                   clearTimeout(regionIdleTimer.current);
                 regionIdleTimer.current = setTimeout(() => {
@@ -645,17 +726,21 @@ export default function MainScreen() {
               }}
               showsUserLocation
               showsMyLocationButton={false}
-              toolbarEnabled={false}
+              toolbarEnabled={true}
               moveOnMarkerPress={false}
             >
+              {/* 충전소 마커 */}
               {visibleMarkers.map(m => (
                 <MarkerItem key={m.id} m={m} pinColor={pinColorOf(m.status)} />
               ))}
+
+              {/* 추천 노드 마커 */}
+              {showNodes &&
+                evNodes.map(n => <MarkerNode key={`N_${n.node_id}`} n={n} />)}
             </MapView>
 
             {/* === 오버레이: 하단 중앙 배너 + 우측 하단 내 위치 === */}
             <View style={styles.mapOverlay} pointerEvents="box-none">
-              {/* 하단 중앙 "이 지역에서 검색하기" */}
               {hasSearched && showSearchHere && (
                 <View
                   style={styles.searchHereCenterWrap}
@@ -663,7 +748,7 @@ export default function MainScreen() {
                 >
                   <TouchableOpacity
                     style={styles.searchHereCenterBtn}
-                    onPress={() => onSearch({ force: false })}
+                    onPress={() => onSearch()}
                   >
                     <Text style={styles.searchHereText}>
                       이 지역에서 검색하기
@@ -672,7 +757,6 @@ export default function MainScreen() {
                 </View>
               )}
 
-              {/* 우측 하단: 내 위치 버튼 */}
               <View style={styles.fabsBottomRight}>
                 <TouchableOpacity
                   style={[styles.fabLocate, isLocating && { opacity: 0.7 }]}
@@ -746,6 +830,10 @@ const styles = StyleSheet.create({
   btnGhostText: { color: '#ffffff', fontWeight: '700', fontSize: 18 },
   btnText: { fontSize: 16 },
 
+  // 추천 노드 버튼 스타일
+  btnBlack: { backgroundColor: '#6b6b6bff' },
+  btnBlackText: { color: '#ffffffff', fontWeight: '700', fontSize: 16 },
+
   mapCard: {
     marginTop: 16,
     marginHorizontal: 16,
@@ -757,7 +845,7 @@ const styles = StyleSheet.create({
     elevation: 6,
   },
   mapBox: {
-    height: 470,
+    height: 415,
     borderRadius: 20,
     overflow: 'hidden',
   },
